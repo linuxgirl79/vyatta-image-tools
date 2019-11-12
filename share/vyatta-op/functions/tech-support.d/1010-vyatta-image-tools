@@ -1,0 +1,24 @@
+#! /bin/bash
+
+# **** License ****
+#
+# Copyright (C) 2017-2019 AT&T Intellectual Property.
+# All Rights Reserved.
+#
+# Copyright (c) 2014-2017, Brocade Communications Systems, Inc.
+# All rights reserved.
+#
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# **** End License ****
+
+
+source "$(cd "$(dirname "${0}")" && pwd -P)"/../tech-support.functions
+
+header SYSTEM Image
+
+header Show System Image Version
+do_cmd run show system image version
+
+header Show System Image Storage
+do_cmd run show system image storage

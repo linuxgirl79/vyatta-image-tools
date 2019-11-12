@@ -1,0 +1,51 @@
+: ${VII_IMAGE_NAME:=$(get_vyatta_version ${INSTALL_SOURCE_DIR} 2>/dev/null)} #VC The name of the image to be installed.
+: ${VII_IMAGE_REPLACE:="No"} #VC The default to replace an existing image of the same name.
+# Default admin username and password
+: ${VII_ADMIN_USERNAME:="vyatta"} #VC The default username installed on the system.
+: ${VII_ADMIN_PASSWORD:=$(SECRET='vyatta' encrypt_shadow_passwd | sed 's:/:\\/:g')} #VC The default password if not set.
+
+# Default admin grub username and password
+: ${VII_ENABLE_GRUB_PASSWORD:='No'} #VC Default to enable/disable a grub password.
+: ${VII_GRUB_USERNAME:='vyatta'}    #VC The default grub username installed on the system. These ubac's can also be set in the vyatta config.
+: ${VII_GRUB_PASSWORD:='vyatta'}    #VC The default grub password if not set.
+
+# Enable a reduced grub.cfg without password or recovery enteries
+: ${VII_GRUB_REDUCED:='No'} #VC This enables a reduced grub layout with only one grub entry per image. The default grub layout uses 4 entries which include password reset options.
+
+# Default config to be copied
+: ${VII_IMAGE_CONFIG_BOOT:=${VYATTA_NEW_CFG_DIR}/config.boot} #VC The default vyatta config to be copied. Default is the one picked of the livecd. I.e. If the livecd has config set, we copy this over to the installed system.
+
+# Should any previous config found be saved?
+# Force No if doing Onie install
+is_onie_boot && VII_IMAGE_SAVE_CONFIG="No"
+: ${VII_IMAGE_SAVE_CONFIG:="Yes"} #VC If any previous config is found on existing disk, chose to copy it over.
+
+: ${VII_CONSOLE:=$(detect_console)} #VC The default system console.
+: ${VII_CONSOLE_SPEED:=$(detect_console_speed "/dev/$VII_CONSOLE")} #VC The default system console speed.
+
+: ${VII_BOOT_PART_SIZE:='0'} #VC The allocated size for the BOOT partition size. This partition is only present in BIOS + gpt installed system.
+: ${VII_BOOT_PART_MIN:='32'} #VC Minimum size the BOOT partition can be.
+: ${VII_ESP_PART_SIZE:='0'} #VC The size of the ESP partition. This partition is only enabled in ESP systems (GPT is forced).
+: ${VII_ESP_PART_MIN:='45'} #VC Minimum size the ESP partition can be.
+: ${VII_VYOS_PART_SIZE:='0'} #VC The size of the vRouter system. Setting this to 0 means we use the rest of the disk space available after all helper and extra partitions have been set.
+: ${VII_VYOS_PART_MIN:='2048'} #VC Minimum size of the vRouter partition.
+: ${VII_LOG_PART_SIZE:='0'} #VC Size of the logging partition.
+: ${VII_VIRT_PART_SIZE:='0'} #VC Size of the libvirt partition. Setting this to 0 means we use the rest of the disk space available after all helper and extra partitions have been set.
+: ${VII_SWAP_PART_SIZE:='0'} #VC Size of the swap partition.
+: ${VII_ONIEBOOT_SIZE:='0'} #VC Size of the ONIE boot partition. On onie install we re-create this partition and copy over any existing ONIE systems. You have however the ability to choose its size.
+
+: ${VII_VROUT_ARRAY:='No'} #VC Turn on/off RAID for the vRouter system.
+: ${VII_VROUT_ARRAY_TYPE:='0'} #VC Size of the vRouter RAID system.
+
+: ${VII_VIRT_ARRAY:='No'} #VC Turn on/off RAID for the libvirt system.
+: ${VII_VIRT_ARRAY_TYPE:='0'} #VC Size of the libvirt RAID system.
+
+: ${VII_LOG_ARRAY:='No'} #VC Turn on/off RAID for the logging system.
+: ${VII_LOG_ARRAY_TYPE:='1'} #VC Size of the logging RAID system.
+
+# the partition table (msdos or gpt)
+: ${VII_DISK_LABEL:='gpt'} #VC Default partition table. This gets forced to gpt on ESP and ONIE installs.
+
+# partition method
+: ${VII_PART_METHOD:='Auto'} #VC Choose your own partition method (parted)
+

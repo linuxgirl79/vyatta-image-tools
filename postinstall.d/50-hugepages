@@ -1,0 +1,74 @@
+#!/bin/bash
+#
+# Vyatta hugepages hook
+#
+
+set -e
+
+: ${vyatta_prefix:=/opt/vyatta}
+: ${vyatta_exec_prefix:=$vyatta_prefix}
+: ${vyatta_sbindir:=${vyatta_exec_prefix}/sbin}
+
+source ${vyatta_sbindir}/vyatta-grub.functions
+source ${vyatta_sbindir}/vyatta-install-image.functions
+export PATH=/usr/sbin:$PATH
+
+# TODO extract common code in vyatta-dataplane.init.d to library
+function num_1G_hugepages()
+{
+    local pages=0
+
+    # Determine available memory in units of kB
+    local mem=$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo)
+    local mb=$(( mem / 1024 ))
+
+    mb=$(((mb + 511) / 1024 * 1024))	# round to nearest GB
+
+    if [ $mb -le 4096 ]; then
+	pages=$(( ( mb / 4 ) / 1024))
+    elif [ $mb -le 16384 ]; then
+	pages=$(( ( mb / 2 ) / 1024))
+    else # max at 8GB
+	pages=8
+    fi
+
+    echo $pages
+}
+
+function hugepages_configure ()
+{
+    # nothing to configure and run by default
+    echo "VII_POSTINSTALL_HUGEPAGE=${VII_POSTINSTALL_HUGEPAGE:-true}"
+}
+
+function hugepages_run ()
+{
+    local root_dir=${1?Missing argument}
+    local image_name=${2?Missing argument}
+
+    # check for IOMMU and pdpe1gb CPU flag
+    if [ $(ls /sys/kernel/iommu_groups | wc -l) -ne 0 -a \
+	 $(grep -c pdpe1gb /proc/cpuinfo) -ne 0 ]; then
+	local pages=$(num_1G_hugepages)
+
+	if [ $pages -gt 0 ]; then
+	    local hugepage_options="hugepagesz=1GB hugepages=${pages}"
+
+	    replace_grub_options "${root_dir}"/boot/grub/grub.cfg "${image_name}"  \
+		"boot=live quiet systemd.show_status=1 nofastboot net.ifnames=1 vyatta-union=/boot/${image_name} ${hugepage_options}"
+	fi
+    fi
+}
+
+case "$1" in
+    configure)
+	hugepages_configure
+	;;
+    run)
+	hugepages_run $2 $3
+	[ "${VII_POSTINSTALL_HUGEPAGES}" = 'true' ] && hugepages_run $2 $3
+	;;
+    *)
+	fail_exit "$0: unknown command: \"$1\""
+	;;
+esac

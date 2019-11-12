@@ -1,0 +1,220 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-only
+
+# -*- mode: shell-script -*-
+#
+# Copyright (c) 2019, AT&T Intellectual Property.
+# All Rights Reserved.
+# Copyright (c) 2014-2017 by Brocade Communications Systems, Inc.
+# All rights reserved.
+#
+# This file is hosting the Live image related shell helpers
+#
+# NOTE: 
+# The unittest exports $SHUNIT_TMPDIR and creates some mock files that we read
+: ${SHUNIT_TMPDIR:=""}
+
+#
+# With different live-boot versions we use different persistence labels
+#
+get_live_persistence_label ()
+{
+    # this is defined in /lib/live/boot/9990-aaa-fixme.sh
+    local custom_overlay_label
+    custom_overlay_label="persistence"
+
+    if [ -r /usr/share/initramfs-tools/scripts/live ] ; then
+	# on live-initramfs we used root_persistence variable
+	local root_persistence
+	eval $(grep -E '^root_persistence=' /usr/share/initramfs-tools/scripts/live)
+	if [ -n "${root_persistence-}" ] ; then
+	    custom_overlay_label="${root_persistence}"
+	fi
+    fi
+
+    echo ${custom_overlay_label}
+}
+export -f get_live_persistence_label
+
+#
+# returns all devices mounted on a particular mountpoint or below a directory,
+# e.g. when a wildcard is given as an argument
+#
+what_is_mounted_on ()
+{
+    local mountpoint
+    mountpoint=${1}
+
+    if [ -z "${mountpoint}" ] ; then
+	return
+    fi
+
+    while read DEV MP REST
+    do 
+	if [[ "${MP} " =~ ^(/usr)?${mountpoint}\  ]]
+	then
+	    echo "${DEV}"
+	fi
+    done < "${SHUNIT_TMPDIR}"/proc/mounts
+}
+
+#
+# Return the mount point for the live image currently in use
+#
+get_live_rootfs_path ()
+{
+    local ROOTFS_DEV IMAGE
+    ROOTFS_DEV=( $(what_is_mounted_on '/lib/live/mount/rootfs.*') )
+    if [ ${#ROOTFS_DEV[@]} -gt 1 ] ; then
+	# PANIC!
+	echo "E: Found multiple rootfs devices: ${ROOTFS_DEV[@]}" >&2
+	exit 1
+    fi
+
+    # in case what_is_mounted_on() returns empty above and nounset is used
+    : ${ROOTFS_DEV:=""}
+
+    #
+    # use sysfs instead of losetup to get the current path of the backing_file
+    #
+    IMAGE=$(cat "${SHUNIT_TMPDIR}"/sys/block/${ROOTFS_DEV##*/}/loop/backing_file 2>/dev/null)
+
+    #
+    # for backward compatibility with live-helper we keep the old mount-point
+    # in this list
+    #
+    for ROOT in ${IMAGE%/boot/*} ${IMAGE%/live/*} /live/image ; do
+	if [ -d "${SHUNIT_TMPDIR}${ROOT}" -a -n "$(what_is_mounted_on "${ROOT}")" ] ; then
+	    echo "${ROOT}"
+	    return
+	fi
+    done
+}
+export -f get_live_rootfs_path
+
+#
+# On success this will return a validated path to the image persistence
+# directory underneath the specified rootfs mount point.
+#
+get_image_persistence_path_from_rootfs ()
+{
+    local IMAGE_NAME ROOTFS_PATH IMAGE_DIR
+    IMAGE_NAME=${1}
+    ROOTFS_PATH=${2}
+    IMAGE_DIR="${ROOTFS_PATH}/boot/${IMAGE_NAME}"
+
+    if [ -z "${IMAGE_NAME}" -o -z "${ROOTFS_PATH}" ] ; then
+	return 1
+    fi
+
+    local rw_path dir
+    for rw_path in persistence/rw persistence live-rw
+    do
+        dir="${IMAGE_DIR}/$rw_path"
+        if [ -d "$dir" ]; then
+            echo "${dir##${ROOTFS_PATH}}"
+            return 0
+        fi
+    done
+
+    exit 1
+}
+export -f get_image_persistence_path_from_rootfs
+
+#
+# On success this will return the existing path to the upperdir directory
+# for a given IMAGE_NAME underneath ROOTFS_PATH. The upperdir could be
+# different than the persistence directory based on the overlay filesystem
+# used.
+#
+get_image_upperdir_path_from_rootfs ()
+{
+    local IMAGE_NAME ROOTFS_PATH UPPERDIR_PATH
+    IMAGE_NAME=${1}
+    ROOTFS_PATH=${2}
+
+    PERSISTENCE_PATH=$(get_image_persistence_path_from_rootfs "${IMAGE_NAME}" \
+	"${ROOTFS_PATH}")
+
+    # FIXME: This needs to return the correct value on Redondo when installing
+    #        an Santa Cruz image!
+    # for OVERLAYFS_NAME = overlayfs
+    #echo "${PERSISTENCE_PATH}"
+
+    # for OVERLAYFS_NAME = overlay
+    echo "${PERSISTENCE_PATH}/rw"
+}
+export -f get_image_upperdir_path_from_rootfs
+
+#
+# Like get_image_persistence_path_from_rootfs but uses current live rootfs.
+#
+get_image_persistence_path ()
+{
+    local IMAGE_NAME ROOTFS_PATH DIR RETVAL
+    IMAGE_NAME=${1}
+    ROOTFS_PATH=$(get_live_rootfs_path)
+    DIR=$(get_image_persistence_path_from_rootfs "${1}" \
+	"${SHUNIT_TMPDIR}${ROOTFS_PATH}")
+
+    RETVAL=$?
+    if [ $RETVAL -eq 0 ] ; then
+	echo ${DIR:+${ROOTFS_PATH}${DIR}}
+    fi
+    return $RETVAL
+}
+export -f get_image_persistence_path
+
+#
+# This is returning the image version for the currently active image.
+#
+get_image_version ()
+{
+    local ROOTFS_DEV IMAGE ROOTFS_PATH
+    ROOTFS_DEV=( $(what_is_mounted_on '/lib/live/mount/rootfs.*') )
+    if [ ${#ROOTFS_DEV[@]} -gt 1 ] ; then
+	# PANIC!
+	echo "E: Found multiple rootfs devices: ${ROOTFS_DEV[@]}" >&2
+	exit 1
+    fi
+
+    # in case what_is_mounted_on() returns empty above and nounset is used
+    : ${ROOTFS_DEV:=""}
+
+    #
+    # use sysfs instead of losetup to get the current path of the backing_file
+    #
+    IMAGE=$(cat "${SHUNIT_TMPDIR}"/sys/block/${ROOTFS_DEV##*/}/loop/backing_file 2>/dev/null)
+
+    # strip the prefix where the rootfs
+    IMAGE=${IMAGE#$(get_live_rootfs_path)}
+
+    # get rid of the image filename itself
+    IMAGE=${IMAGE%/*}
+
+    if [ "${IMAGE}" == "${IMAGE#/boot/}" ] ; then
+	#
+	# we failed to get the image version, so we are:
+	# - on a live CD
+	# - on a live-helper boot
+	#
+	return 1
+    fi
+
+    echo ${IMAGE#/boot/}
+}
+export -f get_image_version
+
+#
+# This returns the full path to the image directory of the running image.
+#
+get_image_path ()
+{
+    local IMAGE ROOTFS_PATH
+
+    IMAGE=$(get_image_version)
+    ROOTFS_PATH=$(get_live_rootfs_path)
+
+    echo "${ROOTFS_PATH}/boot/${IMAGE}"
+}
+export -f get_image_path

@@ -1,0 +1,48 @@
+#!/bin/bash
+#
+#
+
+set -e
+
+: ${vyatta_prefix:=/opt/vyatta}
+: ${vyatta_sbindir:=${vyatta_prefix}/sbin}
+
+source "${vyatta_sbindir}/vyatta-install-image.functions"
+
+# If logging partition found, mount it
+mount_var_log ()
+{
+    local inst_root=$1
+
+    if ! is_live_cd_boot; then
+        # Don't run on add system image
+        return 0
+    fi
+    if ! lsblk_exclude_floppy --output LABEL,PARTLABEL | grep -oq 'LOGS'; then
+        # No logging partition exists, skip.
+        lecho "No logging partition found. Skipping."
+        return 0
+    fi
+    local name='LOGS'
+    local tmp_dir="${inst_root}/var/log"
+    mkdir -p "$tmp_dir" &>/dev/null
+    local output=$(run_command mount -L "$name" "$tmp_dir" &> /dev/null)
+    if [ $? != 0 ]; then
+        becho "Cannot mount $name"
+        lecho "mount -L $name $tmp_dir"
+        lecho "$output"
+    fi
+}
+
+case "$1" in
+    configure)
+	;;
+    run)
+    mount_var_log $2
+	;;
+    *)
+	fail_exit "$0: unknown command: \"$1\""
+	;;
+esac
+
+exit 0

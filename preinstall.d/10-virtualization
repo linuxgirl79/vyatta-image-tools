@@ -1,0 +1,45 @@
+#!/bin/bash
+#
+# virtualization preinstall hook
+#
+# If the current image has virtualization support, make sure the
+# image that is about to installed has virtualization support as well
+#
+
+set -e
+
+: ${vyatta_prefix:=/opt/vyatta}
+: ${vyatta_exec_prefix:=$vyatta_prefix}
+: ${vyatta_sbindir:=${vyatta_exec_prefix}/sbin}
+
+source ${vyatta_sbindir}/vyatta-install-image.functions
+
+function virtualization_configure ()
+{
+    echo "VII_PREINSTALL_VIRTUALIZATION=${VII_PREINSTALL_VIRTUALIZATION:-true}"
+}
+
+function virtualization_run ()
+{
+    local cd_root=${1?Missing argument}
+
+    if dpkg -l | grep -q '^ii  vyatta-virtualization'; then
+        if ! grep -q '^ii  vyatta-virtualization' $CD_ROOT/live/packages.txt; then
+            fail_exit "New install image does not have vCPE support."
+        fi
+    fi
+}
+
+case "$1" in
+    configure)
+	virtualization_configure
+	;;
+    run)
+	[ "${VII_PREINSTALL_VIRTUALIZATION}" = "true" ] && virtualization_run $2
+	;;
+    *)
+	fail_exit "$0: unknown command: \"$1\""
+	;;
+esac
+
+exit 0

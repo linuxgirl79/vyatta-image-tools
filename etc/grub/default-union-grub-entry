@@ -1,0 +1,47 @@
+menuentry "Vyatta @@IMAGE_NAME@@ (Configured console)" {
+    set console_param="tty0"
+    load_env
+    if [ "$boot_console" != "" ]; then
+        if [ "$boot_console" != "tty0" ]; then
+            set console_param="$boot_console,$serial_speed"
+        fi
+    fi
+    linux /boot/@@IMAGE_NAME@@/vmlinuz boot=live quiet systemd.show_status=1 systemd.unified_cgroup_hierarchy=1 nofastboot net.ifnames=1 iommu=pt vyatta-union=/boot/@@IMAGE_NAME@@ console=$console_param
+    initrd /boot/@@IMAGE_NAME@@/initrd.img
+}
+
+menuentry "Vyatta @@IMAGE_NAME@@ (Configured console)" {
+    set console_param="tty0"
+    load_env
+    if [ "$boot_console" != "" ]; then
+        if [ "$boot_console" != "tty0" ]; then
+            set console_param="$boot_console,$serial_speed"
+        fi
+    fi
+    linux /boot/@@IMAGE_NAME@@/vmlinuz boot=live quiet systemd.show_status=1 systemd.unified_cgroup_hierarchy=1 nofastboot net.ifnames=1 iommu=pt vyatta-union=/boot/@@IMAGE_NAME@@ console=$console_param
+    initrd /boot/@@IMAGE_NAME@@/initrd.img
+}
+
+menuentry "Lost password change @@IMAGE_NAME@@ (Configured console)" {
+    set console_param="tty0"
+    load_env
+    if [ "$boot_console" != "" ]; then
+        if [ "$boot_console" != "tty0" ]; then
+            set console_param="$boot_console,$serial_speed"
+        fi
+    fi
+    linux /boot/@@IMAGE_NAME@@/vmlinuz boot=live quiet systemd.show_status=1 systemd.unified_cgroup_hierarchy=1 nofastboot net.ifnames=1 iommu=pt vyatta-union=/boot/@@IMAGE_NAME@@ console=$console_param init=/opt/vyatta/sbin/standalone_root_pw_reset
+    initrd /boot/@@IMAGE_NAME@@/initrd.img
+}
+
+menuentry "Configuration Recovery for above image (Configured console)" {
+    set console_param="tty0"
+    load_env
+    if [ "$boot_console" != "" ]; then
+        if [ "$boot_console" != "tty0" ]; then
+            set console_param="$boot_console,$serial_speed"
+        fi
+    fi
+    linux /boot/@@IMAGE_NAME@@/vmlinuz boot=live quiet systemd.show_status=1 systemd.unified_cgroup_hierarchy=1 nofastboot net.ifnames=1 iommu=pt vyatta-union=/boot/@@IMAGE_NAME@@ console=$console_param init=/opt/vyatta/sbin/standalone_config_recovery
+    initrd /boot/@@IMAGE_NAME@@/initrd.img
+}

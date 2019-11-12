@@ -1,0 +1,496 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-only
+
+#
+# install_get_partition: A script to format hard drives according
+# to a vii recipe or user input. Possible configurations include
+# BIOS/GPT single disks, RAID configurations, and fancy vyatta specifc
+# extra partitions for logging, libvirt images, and swap.
+#
+# Copyright (C) 2010 Vyatta, Inc.
+# All Rights Reserved.
+#
+# Copyright (c) 2014-2017 by Brocade Communications Systems, Inc.
+# All rights reserved.
+#
+# Copyright (C) 2017-2019 AT&T Intellectual Property.
+# All Rights Reserved.
+#
+
+# the INSTALL_LOG env var should be exported by the "caller".
+# it will be used to log messages.
+
+source ${vyatta_sbindir}/install-get-partition.functions
+
+# the base install drive e.g. sda
+INSTALL_DRIVE=''
+# the install partition e.g. sda1
+ROOT_PARTITION=''
+# the type of the install partition: "union", "old", or "new"
+ROOT_PARTITION_TYPE=''
+# global holding variable used in the select_partition sub
+PARTITION=''
+# default file system type
+ROOT_FSTYPE='ext4'
+# default start of root partition
+ROOT_SIZE=0
+
+write_and_exit () {
+    echo "$ROOT_PARTITION_TYPE $ROOT_PARTITION $INSTALL_DRIVE $GRUB_PARTITIONS" >$OUTFILE
+    becho 'Done!'
+    return 0
+}
+
+handle_installed_system () {
+    # We're running on an installed system, so we don't have to find
+    # a partition to install onto
+    if is_union_install; then
+      # this is a union install
+      ROOT_PARTITION_TYPE=union
+    else
+      # this is an old, non-union install
+      ROOT_PARTITION_TYPE=old
+    fi
+    # flag partition and drive as found but we don't actually need them
+    ROOT_PARTITION=dummy
+    INSTALL_DRIVE=dummy
+    write_and_exit
+}
+
+validate_disklabel () {
+    dlabel=$1
+    case $dlabel in
+        "MSDOS" | "M")
+             VII_DISK_LABEL=msdos
+             ;;
+        "GPT" | "G")
+             VII_DISK_LABEL=gpt
+             ;;
+        *)
+             return 1
+             ;;
+    esac
+    return 0
+}
+
+read_disklabel () {
+    local ldrive=/dev/$1
+    local dlabel
+    dlabel=$(parted -s $ldrive p | grep "Partition Table:" | awk '{print $3}')
+    lecho "Partition Table: $dlabel"
+    echo $dlabel
+}
+
+# There may or may not actually be a disk label on the disk at this point
+select_disklabel () {
+
+    # ESP needs gpt
+    if [[ -d /sys/firmware/efi ]]; then
+        VII_DISK_LABEL='gpt'
+        return 0
+    fi
+
+    becho "A legacy partition table (msdos) supports drives up to 2 TB"
+    becho "GPT partition format supports larger drives and partitions"
+
+    while true; do
+        echo -n "Disk label type (msdos/gpt) [$VII_DISK_LABEL]: "
+        local resp=''
+        resp=$(get_response "$VII_DISK_LABEL" "MSDOS GPT M G")
+        validate_disklabel "$(toupper $resp)"
+        local ret=$?
+        if [[ $ret -eq 0 ]]; then
+            break
+        fi
+        # exit if doing autoinstall
+        if [[ -n $VYATTA_PROCESS_CLIENT ]]; then
+            fail_exit "Invalid disk label set."
+        fi
+    done
+}
+
+# check whether there is a disk label / partition table
+check_disklabel () {
+    local ldrive=$1
+
+    parted --script /dev/$ldrive p >/dev/null 2>&1
+
+    # If unable to read disk, it's likely it needs a disklabel
+    if [ "$?" != "0" ]; then
+        lecho "Unable to read disk label."
+        return 1
+    fi
+    return 0
+}
+
+
+# Allow the user to select a partition to work with
+# sets the global PARTITION
+# $1 is the text to display before prompt
+select_partition () {
+  minsize=$1
+  text=$2
+  exclude=$3
+
+  echo -n "Looking for appropriate partitions:  "
+
+  # initialize out global var.  using globals in this way is bad form.  I know.
+  PARTITION=''
+
+  # list only the partitions in /proc/partitions.
+  parts=$(cat /proc/partitions | awk '{ if ($4!="name") { print $4 " "} }' \
+          | egrep "[0-9]" | egrep -v "^loop|^ram|^sr|^fd" | tr -d '\n')
+
+  # remove any partitions we have already previously used
+  if [ -n "$exclude" ]; then
+    for part in $parts; do
+      temp=$(echo $part | egrep -v $exclude)
+      parts_temp="$parts_temp $temp"
+    done
+    parts=$parts_temp
+  fi
+
+  # Get the partition sizes for display
+  # only show linux partitions that have sizes, i.e. remove loops
+  display=''
+  myparts=''
+  for part in $parts; do
+    rootdev=$(echo $part | sed 's/[0-9]//g')
+    parttype=$(fdisk -l /dev/$rootdev | grep $part | grep Linux)
+    if [ -n "$parttype" ]; then
+      lsize=$(get_drive_size $part)
+      if [ "$lsize" -a $lsize -ge $minsize ]; then
+        display="$display $part\t\t$lsize"MB"\n"
+        myparts="$myparts $part"
+      fi
+    fi
+  done
+
+  echo "OK"
+
+  if [ -n "$myparts" ]; then
+    lpartition=''
+    while [ -z "$lpartition" ]; do
+      # take the first partition as the default
+      lpartition=$(echo $myparts | /usr/bin/awk '{ print $1 }')
+
+      echo "I found the following partitions suitable for the Vyatta image:"
+      echo -e "Partition\tSize"
+      echo -e "$display"
+      echo
+      echo -n "$text [$lpartition]: "
+
+      lpartition=$(get_response_raw "$lpartition" "$myparts")
+      echo
+    done
+  else
+    becho "No suitable partition sizes found.  Exiting..."
+    exit 1
+  fi
+  PARTITION=$lpartition
+}
+
+# Delete all existing partitions for an automated install
+# $1 is the drive to delete partitions from
+delete_partitions () {
+  ldrive=$1
+
+  becho "Removing old partitions..."
+
+  # get the partitions on the drive
+  # in the first grep below we add the optional [p] in order to
+  # accomdate cciss drives
+  wait_for_partprobe "/dev/$ldrive"
+  partitions=$(cat /proc/partitions | grep $ldrive[p]*[0-9] \
+               | awk '{ print $4 }' | sed 's/\(.*\)\([0-9]$\)/\2/g' \
+               | grep -v "^$")
+  mkdir -p /mnt/tmp
+
+  # now for each part, blow it away
+  for lpart in $partitions; do
+    dev_name=/dev/$ldrive$lpart
+	wait_for_partprobe "$dev_name"
+	lecho "Removing partition $lpart on /dev/$ldrive"
+	output=$(parted -s /dev/$ldrive rm $lpart 2>&1)
+	status=$?
+	if [ "$status" != 0 ]; then
+	    echo -e "Warning: cannot delete partition $lpart on $ldrive.\n"
+	    echo -e "Please see $INSTALL_LOG for more details."
+	    lecho "Warning: cannot delete partition $lpart on $ldrive."
+	    lecho "parted /dev/$ldrive rm $lpart\n$output"
+	fi
+  done
+}
+
+# mark partition as bootable
+set_bootable_partition () {
+  local ldrive=$1
+  local lpart=${2//[a-z]/}
+  becho "Marking /dev/$ldrive partition $lpart as bootable"
+  output=$(parted -s /dev/$ldrive set $lpart boot on 2>&1)
+  becho "$output"
+}
+
+
+# get drive name from a partition name
+drive_name_from_partition () {
+  echo $1 | sed 's/[0-9]//g'
+}
+
+
+report_disk_minimum () {
+  echo "The vRouter system requires a minimum ${VII_VYOS_PART_MIN}MB disk space"
+  echo "on a partiton type 83 (Linux). If you wish, you may also set up"
+  echo "a software RAID device for the vRouter partition."
+}
+
+select_partition_setup () {
+  local ldrive=$1
+  while [ -z "$ROOT_PARTITION" ]; do
+    # TODO: Note installs assume an LBA BIOS. No boot partition unless GPT.
+    # also note that we are not creating a swap partition right now.
+    ROOT_PARTITION_TYPE=new
+
+    case $PART_METHOD in
+      "parted")
+          setup_method_manual "parted"
+          ;;
+
+      "skip")
+          setup_method_manual "skip"
+          ;;
+
+      "auto")
+          # The default disk parameters should have already been set
+          # by /opt/vyatta/etc/install-image/vii.config
+          skip_if_autoinstall setup_multiple_partitions
+          if is_onie_boot; then
+            write_to_disk onie
+          else
+            write_to_disk regular format
+          fi
+          # Time to settle
+          echo -n "Settling..."
+          wait_for_partprobe "/dev/$INSTALL_DRIVE"
+          ;;
+
+      *)
+          echo 'No valid partition method selected.'
+          ;;
+    esac
+
+    if [ -n "$ROOT_PARTITION" ]; then
+      # got partition. done.
+      break
+    fi
+  done
+}
+
+
+select_part_method () {
+  local ldrive=$1
+  skip_if_autoinstall cat <<EOF
+Would you like me to try to partition a drive automatically
+or would you rather partition it manually with parted?
+
+EOF
+  while [ -z "$PART_METHOD" ]; do
+    check_disklabel $ldrive
+    if [ "$?" != "0" ]; then
+        # don't show skip option if drive partition table can't be read
+        echo -n "Partition (Auto/Parted) [${VII_PART_METHOD}]: "
+        part_method=$(get_response ""${VII_PART_METHOD} "Auto Parted A M P")
+    else
+        echo "If partitions are already set up, you may skip this step."
+        echo -n "Partition (Auto/Parted/Skip) [${VII_PART_METHOD}]: "
+        part_method=$(get_response "${VII_PART_METHOD}" "Auto Parted Skip A M P S")
+    fi
+    case $part_method in
+      "PARTED" | "P")
+          PART_METHOD="parted"
+          ;;
+
+      "SKIP" | "S")
+          PART_METHOD="skip"
+          ;;
+
+      "AUTO" | "A")
+          PART_METHOD="auto"
+          ;;
+
+      *)
+          echo 'No valid partition method selected.'
+	  PART_METHOD=''
+          ;;
+    esac
+  done
+}
+
+
+select_install_drive() {
+  # Check here if possible RAID setup.
+  if [[ -n $VII_VROUT_ARRAY_DISKS ]]; then
+      # vRouter array disks have already been defined by external vii.config
+      VII_VYOS_PART_SIZE=0
+      INSTALL_DRIVE="md/md-vRouter"
+      return
+  fi
+  extra=( $(get_free_devices) )
+  if [[ ${#extra[@]} -ge 2 ]]; then
+      echo -n "Would you like to setup a RAID for the vRouter partition? (Yes/No) [$VII_VROUT_ARRAY]: "
+      response=$(get_response "$VII_VIRT_ARRAY" "Yes No Y N")
+      if [[ "$response" == Y* ]]; then
+          echo -n "RAID type? (0/1/5) [$VII_VROUT_ARRAY_TYPE]: "
+          VII_VROUT_ARRAY_TYPE=$(get_response "$VII_VROUT_ARRAY_TYPE" "0 1 5")
+          VII_VROUT_ARRAY_DISKS=$(gather_raid_devices $VII_VROUT_ARRAY_TYPE)
+          VII_VYOS_PART_SIZE=0
+          INSTALL_DRIVE="md/md-vRouter"
+          return
+      fi
+  fi
+
+  # some drives don't show up in /proc/partitions so we need to bootstrap them
+  while [ -z "$INSTALL_DRIVE" ]; do
+    echo -n "Probing drives: OK"
+    echo -e "\nThe following drives were detected on your system:"
+    select_drive 'Install the image on?' 'INSTALL_DRIVE'
+
+    # check to make sure the drive is large enough to hold the image
+    if [ -n "$INSTALL_DRIVE" ]; then
+      lsize=$(get_drive_size "$INSTALL_DRIVE")
+      total=$VII_VYOS_PART_MIN
+      if [ "$total" -gt "$lsize" ]; then
+        report_disk_minimum
+        echo "$INSTALL_DRIVE is below the minimum required capacity."
+        echo -e "If other drives are present, please select another drive.\n"
+
+        INSTALL_DRIVE=''
+      fi
+    fi
+  done
+}
+
+
+# ask for user input on the parted and skip setup methods
+# $1 is whether or not to run parted
+# sets globals INSTALL_DRIVE, ROOT_PARTITION, CONFIG_PARTITION
+setup_method_manual() {
+  parted=$1
+
+  # if this is parted, let the user create the partitions
+  if [ "$parted" == 'parted' ]; then
+      # TODO: right now we only run parted on a single drive
+
+    # Unmount the install drive if it is mounted
+    unmount "$INSTALL_DRIVE"
+
+    # Run parted and let the user configure
+    parted /dev/$INSTALL_DRIVE
+  fi
+
+  # Ask for the root partition and make sure it's valid
+  while [ -z "$ROOT_PARTITION" ]; do
+    select_partition 500 "Which partition should I install the root on?"
+    # Note that PARTITION is defined in select partition
+    ROOT_PARTITION=$PARTITION
+    unmount "$ROOT_PARTITION"
+    vd=$(grep $ROOT_PARTITION /proc/partitions | awk '{ print $4 }')
+
+    if [ -z "$vd" ]; then
+      echo
+      echo "$ROOT_PARTITION is an invalid partition. Please try again."
+      ROOT_PARTITION=""
+    fi
+  done
+
+  # create the filesystem on the part
+  make_filesystem "$ROOT_PARTITION" "$ROOT_FSTYPE"
+  set_label "$ROOT_PARTITION" "vRouter" "$ROOT_FSTYPE"
+
+  # We need to set the INSTALL_DRIVE if it wasn't set when the user ran parted
+  # We assume that we will use the boot sector of the same drive that the
+  # partition is on.
+  # TODO: Allow different drives to function as the boot device
+  if [ -z "$INSTALL_DRIVE" ]; then
+    INSTALL_DRIVE=$(echo $ROOT_PARTITION | sed 's/[0-9]//g')
+  fi
+}
+
+unmount () {
+  # grab the list of mounted drives
+  # make sure to reverse sort so as to unmount up the tree
+  mounted=$(mount | grep "$1" | cut -f3 -d' ' | sort -r)
+  if [ -n "$mounted" ]; then
+    echo    "I need to unmount: "
+    echo    "$mounted"
+
+    response=''
+    while [ -z "$response" ]; do
+      echo -n "Continue (Yes/No) [No]: "
+      response=$(get_response "No" "Yes No Y N")
+      if [[ "$response" == N* ]]; then
+        echo -e "Ok then.  Need to unmount to continue.\nExiting..."
+        exit 1
+      fi
+    done
+
+    for parts in "$mounted"; do
+      lecho "umount $parts"
+      output=$(umount $parts)
+      status=$?
+      if [ "$status" != 0 ]; then
+        echo -e "Exiting: error unmounting $parts.\nPlease see $INSTALL_LOG for more details."
+        lecho "Exiting: error unmounting $parts.\numount $parts\n$output"
+        exit 1
+      fi
+    done
+  fi
+}
+
+#####  Main
+##
+# turn off any mounted swap files
+install_get_partition () {
+    export OUTFILE=${1:?Missing OUTFILE}
+    swapoff -a
+
+    if is_live_cd_boot; then
+    :
+    else
+        handle_installed_system
+    fi
+
+    report_disk_minimum
+
+    while true; do
+
+      select_install_drive
+
+      select_disklabel
+
+      select_part_method $INSTALL_DRIVE
+
+      echo -n "Validating defaults..."
+      if ! validate_partition_sizes; then
+        if [[ $VYATTA_PROCESS_CLIENT == "yes" ]]; then
+            fail_exit "Input validation failed..."
+        fi
+        echo -e "*** WARNING!"
+        echo "The default partition sizes do not fit on the selected disk. You may"
+        echo "manually adjust sizes but smaller partitions may result in a unstable"
+        echo "system."
+      else
+        echo " [OK]"
+      fi
+
+      select_partition_setup $INSTALL_DRIVE
+
+      break
+    done
+
+    if [ -z "$ROOT_PARTITION" ]; then
+      fail_exit 'Partition not selected. Exiting...'
+    fi
+
+    write_and_exit
+}

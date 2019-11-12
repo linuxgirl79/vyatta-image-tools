@@ -1,0 +1,2424 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-only
+
+# Copyright (c) 2018-2019, AT&T Intellectual Property.
+# All Rights Reserved.
+
+# Copyright (c) 2014-2017 by Brocade Communications Systems, Inc.
+# All rights reserved.
+
+: ${vyatta_prefix:=/opt/vyatta}
+: ${vyatta_exec_prefix:=$vyatta_prefix}
+: ${vyatta_bindir:=${vyatta_exec_prefix}/bin}
+: ${vyatta_sbindir:=${vyatta_exec_prefix}/sbin}
+: ${vyatta_sysconfdir:=${vyatta_prefix}/etc}
+: ${vyatta_datadir:=${vyatta_prefix}/share}
+
+# used in unittest to add directory prefix
+: ${SHUNIT_TMPDIR:=""}
+
+# mount point for the install root.
+# for union install, this is a r/w union mount.
+# for non-union install, this is the root partition mount.
+INST_ROOT=/mnt/inst_root
+
+# mount point for the writable root, i.e., the root partition.
+# this is only used for union install.
+WRITE_ROOT=/mnt/wroot
+
+# mount point for the readonly squashfs mount.
+# this is only used for union install.
+READ_ROOT=/mnt/squashfs
+
+# mount point for the ISO image.
+# this is only used when installing with an ISO image file
+# (instead of from a live CD boot).
+CD_ROOT=/mnt/cdrom
+
+# mount point for the squashfs image in the ISO image.
+# this is only used when installing with an ISO image file
+# (instead of from a live CD boot).
+CD_SQUASH_ROOT=/mnt/cdsquash
+
+# the vyatta config dir
+VYATTA_CFG_DIR=${vyatta_sysconfdir}/config
+VYATTA_NEW_CFG_DIR=/config
+
+export part_table=15
+
+# echo to log. uses INSTALL_LOG if set.
+# lecho "LOG MESSAGE"
+lecho ()
+{
+  local func=${FUNCNAME[1]}
+  local log_msg=( "$@" )
+  log_msg=( ${log_msg[@]//-n/} ) # Trim any no newline operands
+  [ -z $log_msg ] && return
+  local log=${INSTALL_LOG-"/tmp/install-$$.log"}
+  if [ -n "$log" ]; then
+    if [[ $func == "becho" ]]; then
+      echo -e "[${log_msg[0]}]: ${log_msg[@]:1}" >>$log
+      return 0
+    elif [[ $func == "run_command" ]]; then
+      # use caller of run_command
+      func=${FUNCNAME[2]}
+      echo -e "[$func]:run_command: ${log_msg[@]}" >>$log
+    else
+      echo -e "[$func]: ${log_msg[@]}" >>$log
+    fi
+  fi
+}
+
+# echo to both stdout and log
+# becho "LOG MESSAGE"
+becho ()
+{
+  local func=${FUNCNAME[1]}
+  local log_msg=( "$@" )
+  lecho "$func" "${log_msg[@]}"
+  echo -e ${log_msg[@]}
+}
+
+# fatal errors go out to both
+fail_exit ()
+{
+  becho "ERROR: $*"
+  becho 'Exiting...'
+  if is_onie_boot; then
+      cat $INSTALL_LOG
+  fi
+  exit 1
+}
+
+toupper () {
+    echo "$*" | tr '[:lower:]' '[:upper:]'
+}
+
+tolower () {
+    echo "$*" | tr '[:upper:]' '[:lower:]'
+}
+
+# Validates a user response.  Returns the response if valid.
+# Returns the default is the user just hits enter.  
+# Returns nothing if not valid.  Default parameter is $1.
+# Options are in $2.  If options are defined return must be a member
+# of the enum. 
+get_response () {
+  local ldefault=$(toupper "$1")
+  local loptions=$(toupper "$2")
+
+
+  if [ "$VYATTA_PROCESS_CLIENT" == "gui2_rest" ]; then
+      myresponse=$ldefault
+  else
+      # get the response from the user
+      read myresponse
+      if [[ $VYATTA_PROCESS_CLIENT == "yes" ]]; then
+	      echo >&2
+      fi
+      myresponse=$(toupper "$myresponse")
+  fi
+
+  # Check to see if the user accepts the default
+  if [ -z "$myresponse" ]; then
+    echo -n $ldefault
+  elif [ -n "$loptions" ]; then
+    # make sure response is a valid option
+    for token in $loptions
+      do
+        if [ "$token" == "$myresponse" ]; then
+          echo -n "$myresponse"
+          return 0
+        fi
+      done
+    return 1
+  else
+    echo -n "$myresponse"
+  fi
+
+  return 0
+}
+
+# Variant of get_response() that is not calling toupper on result
+get_response_raw () {
+  local ldefault="$1"
+  local loptions=$(toupper "$2")
+
+
+  if [ "$VYATTA_PROCESS_CLIENT" == "gui2_rest" ]; then
+      myresponse=$ldefault
+  else
+      # get the response from the user
+      read myresponse
+      if [[ $VYATTA_PROCESS_CLIENT == "yes" ]]; then
+	      echo >&2
+      fi
+  fi
+
+  # Check to see if the user accepts the default
+  if [ -z "$myresponse" ]; then
+    echo -n $ldefault
+  elif [ -n "$loptions" ]; then
+    # make sure response is a valid option
+    for token in $loptions
+      do
+        if [ "$token" == $(toupper "$myresponse") ]; then
+          echo -n "$myresponse"
+          return 0
+        fi
+      done
+    return 1
+  else
+    echo -n "$myresponse"
+  fi
+
+  return 0
+}
+
+# Return the size of the drive in MB
+get_drive_size () {
+  local ldrive=$1
+
+  # Get size of disk in 1k blocks
+  local bytes=$(lsblk -bdrn -o SIZE /dev/$ldrive)
+  if [[ -z $bytes ]]; then
+      fail_exit "Unable to get drive size"
+  fi
+  # Translate to Megabytes (SI units)
+  local lsize=$(($bytes / 1000000))
+
+  echo $lsize
+}
+
+lsblk_exclude_floppy ()
+{
+    lsblk --exclude 1,2,31 "$@"
+}
+
+filter_used_devices ()
+{
+  local drives=( ${@?Missing drvies input} )
+
+  # Remove the booted medium
+  boot_drive=$(what_is_mounted_on '/lib/live/mount/medium' | grep -ohe '[sv]d[a-z]')
+  drives=( ${drives[@]/$boot_drive} )
+
+  # Also remove any drives already included in the working RAID setup
+  # @raid_array gets set in gather_raid_devices...
+  for rm in ${raid_array[@]}; do
+      drives=( ${drives[@]/$rm} )
+  done
+
+  # Remove previously set up raid disks
+  for rm in $VII_VROUT_ARRAY_DISKS $VII_VIRT_ARRAY_DISKS $VII_LOG_ARRAY_DISKS; do
+      drives=( ${drives[@]/$rm} )
+  done
+
+  # Remove the install drive, if set
+  drives=( ${drives[@]/$INSTALL_DRIVE} )
+
+  echo ${drives[@]}
+}
+
+get_free_devices () {
+  local drives=( $(lsblk_exclude_floppy --nodeps --output TYPE,KNAME,MOUNTPOINT | \
+	grep -v "/lib/live/mount/medium" | awk '{print $1, $2}' | \
+	sed -ne 's/^disk //p') )
+  drives=( $(filter_used_devices "${drives[@]}") )
+  echo ${drives[@]}
+}
+
+# Display text $1 before choice.
+# Sets the variable named by $2.
+# Note that select_drive should be wrapped
+# in the verification loop, not the included get_response.
+# see /usr/include/linux/major.h for exclude devices (1=ramdisk, 2=floppy, 31=mtdblock)
+# note that Debian 8 lsblk seems to have a bug and lists the ramdisk if
+# --exclude is used but not if --exclude is absent from the command line
+select_drive () {
+  local msg=$1
+  local outvar=$2
+
+  drives=( $(get_free_devices) )
+
+  if [[ -z "${drives[@]}" ]]; then
+      fail_exit "No disk drives found."
+  fi
+
+  # Add the drive sizes to the display to help the user decide
+  display=''
+  for drive in "${drives[@]}"; do
+    size=$(get_drive_size $drive)
+    display="$display $drive\t$size"MB"\n"
+  done
+
+  while true; do
+    # Display the drives and ask the user which one to install to
+    echo -e "$display"
+    echo -n "$1 [${drives[0]}]:"
+    response=$(get_response_raw "${drives[0]}" "${drives[*]}") && break
+  done
+  eval "$outvar=$response"
+}
+
+
+# Add a console entry to the config file.
+# $1: Console device name (e.g. ttyS0)
+# $2: Path to config file
+#
+add_console_entry () {
+  console_dev=$1
+  config_file=$2
+  speed=$3
+  sed -i -e "/console {/a \ \
+        device $console_dev {\n\
+            speed $speed\n\
+        }" $config_file
+}
+
+# $1: user name
+# $2: encrypted password
+# $3: config file
+set_encrypted_password () {
+  sed -i -e \
+    "/ user $1 {/,/}/s/encrypted-password.*\$/encrypted-password \"$2\"/" $3
+}
+
+_dialog_enter_password ()
+{
+    local user=${1?$FUNCNAME requires user argument}
+    local plaintext=${2}
+
+    local pwd1="1"
+    local pwd2="2"
+
+    until [[ "$pwd1" == "$pwd2" ]]; do
+    read -p "Enter password for user '$user':" -r -s pwd1 <>/dev/tty 2>&0
+    echo >/dev/tty
+    if [[ "$pwd1" == "" ]]; then
+        echo "'' is not a valid password" >/dev/tty
+        # Fixes VRVDR-33890 -- a non-matching case 
+        # (with the retyped passwd being null) followed by a null passwd fails
+        pwd1="1"
+        pwd2="2"
+        continue
+    fi
+
+    # Test against the systems pwquality.conf settings if is configured
+    if cli-shell-api showCfg --show-active-only | cfgcmds | \
+        grep -q 'system password requirements' && \
+        ! echo $pwd1|pwscore  >/dev/null 2>/dev/tty; then
+        pwd1="1"
+        pwd2="2"
+        continue
+    fi
+
+    read -p "Retype password for user '$user':" -r -s pwd2 <>/dev/tty 2>&0
+    echo >/dev/tty
+
+    if [ "$pwd1" != "$pwd2" ]; then
+        echo "Passwords do not match" >/dev/tty
+        pwd1="1"
+        pwd2="2"
+    fi
+    done
+
+    if [[ $plaintext == "" ]]; then
+        echo $(SECRET="$pwd1" encrypt_shadow_passwd | sed 's:/:\\/:g')
+    else
+        echo "$pwd1"
+    fi
+}
+
+# Sets VII_ADMIN_USERNAME and VII_ADMIN_PASSWORD used in postinstall
+get_password () {
+  local user=$1
+
+  VII_ADMIN_PASSWORD=$(_dialog_enter_password ${user})
+}
+
+# returns true if it's a disk-based boot
+is_disk_based_boot()
+{
+    islive=`grep boot=live /proc/cmdline`
+    if [ -z "$islive" ]; then
+	# Return value 0 is "true" is shell
+	return 0
+    else
+	return 1
+    fi
+}
+
+#
+# returns all devices mounted on a particular mountpoint or below a directory,
+# e.g. when a wildcard is given as an argument
+#
+what_is_mounted_on ()
+{
+    local mountpoint
+    mountpoint=${1}
+    # deal with usrmerge and expect an optional /usr in the mountpoint
+    grep "^[^ ]\+ \(/usr\)\?${mountpoint} " /proc/mounts | cut -d' ' -f1
+}
+
+hex_to_dec_major_minor ()
+{
+    local MAJOR_MINOR MAJOR MINOR
+    MAJOR_MINOR=${1}
+
+    MAJOR=$(printf "%d" 0x"$(echo ${MAJOR_MINOR} | cut -d':' -f1)")
+    MINOR=$(printf "%d" 0x"$(echo ${MAJOR_MINOR} | cut -d':' -f2)")
+
+    echo "${MAJOR}:${MINOR}"
+}
+
+detect_loop_backing_device ()
+{
+    local DEVICE_NAME MAJOR_MINOR
+    DEVICE_NAME=${1}
+
+    local SYSFS_BACKING BACKING_FILE DEV_NO
+    SYSFS_BACKING="${SHUNIT_TMPDIR}/sys/block/${DEVICE_NAME##*/}/loop/backing_file"
+    BACKING_FILE=$(cat ${SYSFS_BACKING} 2>/dev/null)
+    [ -z "$BACKING_FILE"  ] && return
+    DEV_NO=$(stat --printf="%D" ${SHUNIT_TMPDIR}${BACKING_FILE} 2> /dev/null)
+    MAJOR_MINOR=$(V="$(printf '%04x' "0x${DEV_NO}" 2> /dev/null)" ; \
+	echo "${V:0:2}:${V:2:2}" 2> /dev/null)
+
+    echo "$MAJOR_MINOR"
+}
+
+# Test if the root filesystem is CD format
+#  this allows boot from live CD or image on USB
+is_cd_device ()
+{
+    local DEVICE_NAME MAJOR_MINOR DEVNAME ID_FS_TYPE
+    DEVICE_NAME=${1}
+
+    case ${DEVICE_NAME} in
+	'')
+	    return 1
+	    ;;
+	/dev/loop*)
+	    MAJOR_MINOR=$(detect_loop_backing_device "${DEVICE_NAME}")
+	    ;;
+	*)
+	    MAJOR_MINOR=$(stat -c "%t:%T" "${DEVICE_NAME}")
+	    ;;
+    esac
+
+    MAJOR_MINOR=${MAJOR_MINOR:+$(hex_to_dec_major_minor "${MAJOR_MINOR}")}
+    DEVNAME=$(udevadm info --query=name --path="/dev/block/$MAJOR_MINOR" 2>/dev/null)
+
+    #
+    # Sometimes udev doesn't look inside the device (e.g. mtdblock) so lets
+    # explicitly query it via blkid here
+    #
+    ID_FS_TYPE=$(eval $(blkid -o udev "/dev/$DEVNAME") ; echo "$ID_FS_TYPE")
+
+    [[ "$ID_FS_TYPE" == 'iso9660' ]] && return 0 || return 1
+}
+
+# Need to simulate livecd install when doing onie boot
+is_onie_boot ()
+{
+    if lsblk_exclude_floppy --noheadings --output=PARTLABEL | \
+	    grep -q 'ONIE-BOOT' && \
+	    grep -q --invert-match 'vyatta-union' /proc/cmdline; then
+        return 0
+    fi
+    return 1
+}
+
+# returns true if it's a live cd boot
+is_live_cd_boot ()
+{
+    local ROOTFS_DEV
+    ROOTFS_DEV=( $(what_is_mounted_on '/lib/live/mount/rootfs.*') \
+	$(what_is_mounted_on '/live/image') )
+
+    if [ ${#ROOTFS_DEV[@]} -gt 1 ] ; then
+	#echo "E: Found multiple rootfs devices: ${ROOTFS_DEV[@]}"
+	return 1
+    fi
+
+    if is_cd_device "${ROOTFS_DEV}" \
+        || is_usb_boot || is_onie_boot; then
+	return 0
+    else
+	return 1
+    fi
+}
+
+is_usb_boot ()
+{
+  case $(what_is_mounted_on '/' | grep -v rootfs) in
+      unionfs|overlayfs|overlay)
+          if $(mount | grep -q "upperdir=\(/run\)\?/live/overlay"); then
+	      return 0
+	  fi
+	  ;;
+  esac
+
+  # In doubt say NO!
+  return 1
+}
+
+# returns true if it's a union-install boot
+is_union_install ()
+{
+  if is_live_cd_boot; then
+    return 1
+  fi
+
+  case $(what_is_mounted_on '/' | grep -v rootfs) in
+      unionfs|overlayfs|overlay)
+	  # support for old live-helper version
+	  if grep -q " /live/image [^ ]\+ rw" /proc/mounts ; then
+	      return 0
+	  fi
+	  if grep -q "vyatta-union=" /proc/cmdline ; then
+	      return 0
+	  fi
+	  ;;
+  esac
+
+  # in doubt say "No!"
+  return 1
+}
+
+#
+# This function will run a command and in case of a failure log the command
+# line and the stderr via becho to the console and the logfile.
+#
+run_command ()
+{
+    local cmd_std cmd_err cmd_ret
+
+    # this needs to use "$@" to properly handle escaped strings including whitespaces
+    eval "$( ( "$@" ) 2> >(cmd_err=$(cat); typeset -p cmd_err) > >(cmd_std=$(cat); typeset -p cmd_std); cmd_ret=$?; typeset -p cmd_ret )"
+
+    if [ "${cmd_ret}" -ne 0 ] ; then
+	becho "ERROR: $@" >&2
+	becho "${cmd_err}" >&2
+    else
+	lecho "DEBUG: $@"
+	lecho "${cmd_err//$'\n'/\\n}"
+    fi
+
+    echo -e -n "${cmd_std:+${cmd_std}\n}"
+    return ${cmd_ret}
+}
+
+get_vyatta_version ()
+{
+    local ROOT=${1:-"/"}
+    local version
+
+    local squash_file=$ROOT/live/filesystem.squashfs
+    if [ -f "$squash_file" ]; then
+        local squashfs_dir=`mktemp -d /tmp/install-image-version-XXXXXXXX`
+        try_mount "-o loop,ro -t squashfs $squash_file $squashfs_dir"
+        ROOT="$squashfs_dir"
+    fi
+
+    version=`awk '/Version:/ {print $2}' ${ROOT}/opt/vyatta/etc/version 2> /dev/null`
+
+    if [ -f "$squash_file" ]; then
+        umount $squashfs_dir
+        rmdir $squashfs_dir
+    fi
+
+    echo ${version:-"UNKNOWN"}
+}
+export -f get_vyatta_version
+
+# outputs the version string of the current running version.
+#
+# DEPRECTATED: use get_vyatta_version() instead
+get_cur_version ()
+{
+    get_vyatta_version
+}
+
+# outputs the version string of the new version, i.e., the version that is
+# being installed. this can be from live CD boot or from a ISO image file.
+#
+# DEPRECTATED: use get_vyatta_version() instead
+get_new_version ()
+{
+    local ver_path=/var/lib/dpkg/status
+    local ver_file=${CD_SQUASH_ROOT}${ver_path}
+    if [ -f "$ver_file" ]; then
+	get_vyatta_version ${CD_SQUASH_ROOT}
+    fi
+
+    ver_file=${ver_path}
+    if is_live_cd_boot && [ -f "$ver_file" ]; then
+	get_vyatta_version "/"
+    fi
+
+    # couldn't find it
+}
+
+# Generate mount options based on the type of union mount
+gen_mopts ()
+{
+    local mnttype=$1
+    local upper=$2
+    local lower=$3
+    local mntpoint=$4
+
+    case "$1" in
+        overlayfs)
+            echo "-t $mnttype -o noatime,upperdir=$upper,lowerdir=$lower $mnttype $mntpoint"
+            ;;
+        overlay)
+            mkdir -p ${upper}/rw
+            mkdir -p ${upper}/work
+            echo "-t $mnttype -o noatime,upperdir=${upper}/rw,lowerdir=$lower,workdir=${upper}/work $mnttype $mntpoint"
+            ;;
+        *)
+            echo "-t $mnttype -o noatime,dirs=$upper=rw:$lower=ro $mnttype $mntpoint"
+            ;;
+    esac
+}
+
+# try to mount. log any errors and return the appropriate status.
+# $1: arguments for mount
+try_mount ()
+{
+  args="$*"
+  output=$(eval "mount $args 2>&1")
+  status=$?
+  if [ $status == 0 ]; then
+    return 0
+  fi
+  # error
+  cat >&2 <<EOF
+Error trying to mount a partition/directory.
+Please see $INSTALL_LOG for details.
+EOF
+  lecho 'Error trying to mount a partition/directory.'
+  lecho "mount $args\n$output"
+  return 1
+}
+
+#
+# Try to unmount all mount-points mounted on sub-directories of ${1} in
+# reverse order they have been mounted.
+#
+try_umount()
+{
+    local MP=${1?Requires argument}
+    local a b
+
+    lecho "DEBUG: try_umount ${MP}"
+
+    while read a b a; do
+	if [ "${b#${MP}}" != "${b}" ] ; then
+	    run_command umount -d "${b}" 2>/dev/null || ( \
+		lecho "$(lsof -V +f -- "${b}" 2>&1)" ; \
+		run_command umount -l -d "${b}" )
+	fi
+    done < <(tac /proc/mounts)
+}
+
+validate_image_name ()
+{
+    local NEWNAME=$1
+
+    if [ -z "$NEWNAME" ]; then
+	fail_exit 'Invalid image name.'
+    fi
+
+    # Validate image name
+    if [ "$NEWNAME" = "grub" -o "${NEWNAME:0:7}" = "vmlinuz" -o \
+	"${NEWNAME:0:6}" = "initrd" -o "${NEWNAME:0:10}" = "System.map" -o \
+	"$NEWNAME" = "Old-non-image-installation" ]; then
+	fail_exit "Can't use $NEWNAME.  It is a reserved image name."
+    fi
+
+    local badchars=$(echo ${NEWNAME} | sed -e 's/[a-zA-Z0-9\.\_+-]//g')
+    if [ -n "$badchars" ]; then
+	fail_exit "Image name must be composed of a-z, A-Z, 0-9, or one of ._+-"
+    fi
+}
+
+install_image ()
+{
+    # root directory to install from
+    local CD_ROOT=${1%%/}
+    # image name
+    local image_name=${2:?install_image: no image name given}
+    # root directory to install to
+    local WRITE_ROOT=${3%%/}
+
+    local CD_SQUASH_ROOT=/mnt/cdsquash
+
+    if [ -d $WRITE_ROOT/boot/$image_name ] ; then
+	fail_exit "An image called $image_name is already installed"
+    fi
+
+    #
+    # Check to make sure we have enough space to install image...
+    #
+    local space_avail=$(df -k ${WRITE_ROOT} 2>/dev/null | tail -1 | awk '{ print $4 }')
+    local space_needed=$(du -s ${CD_ROOT}/live 2>/dev/null | awk  '{ print $1 }')
+
+    if [ 0$space_avail -le 0$space_needed ]; then
+	echo "We do not have enough disk space to install this image!"
+	echo "We need $space_needed KB, but we only have $space_avail KB."
+	echo "Exiting..."
+	exit 1
+    fi
+
+    # make the dir for the new version
+    if ! install -m755 -d $WRITE_ROOT/boot/$image_name; then
+	fail_exit 'Cannot create directory for new release.'
+    fi
+    # make dir for backing store
+    local rw_dir=$WRITE_ROOT/boot/$image_name/$(get_live_persistence_label)
+    if ! install -m755 -d $rw_dir; then
+	fail_exit 'Cannot create directory for new release.'
+    fi
+
+    # create persistence.conf for new persistence label
+    if [ "${rw_dir##*/}" = "persistence" ] ; then
+	cat > $rw_dir/persistence.conf <<EOF
+/ union
+EOF
+    fi
+
+    echo Copying squashfs image...
+    # these are the defaults if installing from a specified ISO image file.
+    # in such cases, the ISO image has already been mounted by caller.
+    local squash_img=${CD_ROOT}/live/filesystem.squashfs
+    local boot_dir=${CD_SQUASH_ROOT}/boot
+    local boot_files=$(find $boot_dir -maxdepth 1 -type f -o -type l 2>/dev/null)
+    if [ ! -f "$squash_img" ] || [ -z "$boot_files" ]; then
+        # maybe installing from a live CD boot?
+        squash_img=$(get_live_rootfs_path)/live/filesystem.squashfs
+        boot_dir=${SHUNIT_TMPDIR}/boot
+        boot_files=$(find $boot_dir -maxdepth 1 -type f -o -type l 2>/dev/null)
+        if [ ! -f "$squash_img" ] || [ -z "$boot_files" ]; then
+            # not a live CD boot either. give up.
+            fail_exit 'Cannot find the squashfs image.'
+        fi
+    fi
+
+    local target_squash=$WRITE_ROOT/boot/$image_name/$image_name.squashfs
+    cp -p $squash_img $target_squash >&/dev/null
+    echo Copying kernel and initrd images...
+    cp --no-dereference --preserve=all $boot_files \
+	$WRITE_ROOT/boot/$image_name/ >&/dev/null
+}
+
+install_grub_bios ()
+{
+    local opt_arr=( "$@" )
+    local grub_root=${opt_arr[0]}        # mountpoint
+    local grub_inst_drvs=( ${opt_arr[@]:1} )    # drive name (e.g. sda)
+
+    for d in ${grub_inst_drvs[@]}; do
+
+    if [ ! -b "/dev/$d" ] ; then
+	fail_exit "/dev/$d: Invalid drive/partition."
+    fi
+
+    echo -n "Setting up grub on /dev/$d: "
+    lecho "Setting up grub on /dev/$d..."
+
+    # Install grub in the boot sector of the primary drive
+    run_command grub-install --force --no-floppy \
+			       --recheck --root-directory=$grub_root \
+                   --boot-directory=$grub_root/boot \
+			       /dev/$d
+    local ret=$?
+
+    if [ $ret == 0 ]; then
+	echo 'OK'
+    else
+	echo 'Grub failed to install!'
+	exit 1
+    fi
+
+    done # for d in ${grub_inst_drvs[@]}; do
+}
+
+install_grub_efi ()
+{
+    local opt_arr=( "$@" )
+    local root=${opt_arr[0]}        # mountpoint
+    local grub_inst_drv=( "${opt_arr[@]:1}" )    # drive name (e.g. sda)
+
+    for d in ${grub_inst_drv[@]}; do
+
+    if [ ! -b "/dev/$d" ] ; then
+	fail_exit "/dev/$d: Invalid drive/partition."
+    fi
+
+    local esp_part=$(fdisk -l /dev/$d 2>/dev/null | grep 'EFI System' | cut -d' ' -f1)
+    if [ ! -b "$esp_part" ]; then
+	fail_exit "$esp_part: Invalid drive/partition."
+    fi
+
+    mkdir -p $root/boot/efi
+    if ! try_mount "$esp_part $root/boot/efi"; then
+	fail_exit "$esp_part: Cannot mount partition."
+    fi
+
+    echo -n "Setting up grub on /dev/$d: "
+    lecho "Setting up grub on /dev/$d..."
+
+    # Dynamically finding the modules via
+    # $ find /usr/lib/grub/x86_64-efi -name '*.mod' -exec basename -s .mod {} \;
+    # doesn't work (error is "Coreboot table not found") so we need to hardcode
+    # it here (based on grub2/debian/build-efi-images):
+    local grub_efi_modules="all_video
+        boot
+        btrfs
+        cat
+        chain
+        configfile
+        echo
+        efifwsetup
+        efinet
+        ext2
+        fat
+        font
+        gettext
+        gfxmenu
+        gfxterm
+        gfxterm_background
+        gzio
+        halt
+        hfsplus
+        iso9660
+        jpeg
+        keystatus
+        loadenv
+        linux
+        linuxefi
+        lsefi
+        lsefimmap
+        lsefisystab
+        lssal
+        lvm
+        mdraid09
+        mdraid1x
+        memdisk
+        minicmd
+        normal
+        part_apple
+        part_msdos
+        part_gpt
+        password_pbkdf2
+        png
+        raid5rec
+        raid6rec
+        reboot
+        search
+        search_fs_uuid
+        search_fs_file
+        search_label
+        sleep
+        test
+        tftp
+        true
+        video
+        zfs
+        zfscrypt
+        zfsinfo
+"
+
+    # Install grub in the boot sector of the primary drive
+    # If the signed grub EFI binaries are available always install them
+    # as they will work just fine even if Secure Boot is not enabled
+    run_command grub-install --uefi-secure-boot --no-floppy \
+                        --recheck --root-directory=$root \
+                        --boot-directory=$root/boot \
+                        --bootloader-id=debian \
+                        --efi-directory=$root/boot/efi \
+                        --modules="$(echo -n $grub_efi_modules)" \
+                        /dev/$d
+
+    local ret=$?
+
+    run_command umount $root/boot/efi
+    rmdir $root/boot/efi
+
+    if [ $ret == 0 ]; then
+	echo 'OK'
+    else
+	fail_exit 'Grub failed to install!'
+    fi
+
+    done # for d in ${grub_inst_drv[@]}; do
+}
+
+install_grub_efi_bootmgr_entry ()
+{
+    local drives=( "$@" )
+
+    for d in ${drives[@]}; do
+        run_command efibootmgr \
+            -c -q -d "/dev/$d" -p 1 -L "Vyatta-$d" \
+            -l "/EFI/debian/shimx64.efi"
+    done
+}
+
+# setup grub on the boot sector of a user selected drive
+install_grub () {
+    local opt_arr=( "$@" )
+    local grub_root=${opt_arr[0]}        # mountpoint
+    local grub_setup_args="-u ${opt_arr[1]}"     # image name
+    local grub_inst_drvs=( ${opt_arr[@]:2} )    # drive names (e.g. sda)
+
+    install -m755 -d $grub_root/boot/grub
+
+    if [ -d /sys/firmware/efi ] ; then
+	install_grub_efi $grub_root ${grub_inst_drvs[@]}
+	install_grub_efi_bootmgr_entry ${grub_inst_drvs[@]}
+    else
+	install_grub_bios $grub_root ${grub_inst_drvs[@]}
+    fi
+}
+
+prepare_install_root ()
+{
+    local ROOT=${1}
+    local IMAGE_NAME=${2}
+
+    if [ "${ROOT}" == "auto" ] ; then
+	# install-get-partition is interactive to we need to make it
+	# output where the user can see it
+	exec 3>&1       # save stdout to fd 3
+	exec 1>&2       # redirect stdin to stderr
+
+	local PART_FILE=$(mktemp /tmp/inst-get-part.XXXXXX) \
+	    || fail_exit 'Failed to create temporary file'
+	if ! install_get_partition $PART_FILE; then
+	    exec 1>&3       # restore stdout
+	    exec 3>&-       # close fd 3
+	    return 1
+	fi
+
+	local PART_TYPE
+	local PART
+	local INST_DRV
+	local UNDERLYING
+	read PART_TYPE PART INST_DRV UNDERLYING <$PART_FILE
+	rm -f $PART_FILE
+
+	if [ ! -b "/dev/${PART}" ]; then
+	    fail_exit "/dev/${PART}: Invalid drive/partition."
+	fi
+
+	becho "Mounting /dev/${PART}..."
+
+        # mount the partition
+	mkdir -p "${WRITE_ROOT}" || \
+	    fail_exit "Failed to set up mountpoint for new partition."
+	if ! try_mount "/dev/${PART} $WRITE_ROOT"; then
+	    fail_exit '/dev/${PART}: Cannot mount partition.'
+	fi
+
+	# install bootloader for newly created partitions
+	if [ -n "$UNDERLYING" ]; then
+		install_grub "${WRITE_ROOT}" "${IMAGE_NAME}" $UNDERLYING || \
+		return 1
+	elif is_onie_boot; then
+		install_grub "${WRITE_ROOT}" "${IMAGE_NAME}" "${PART}" || \
+		return 1
+	elif [ "${PART_TYPE}" == "new" ] ; then
+		install_grub "${WRITE_ROOT}" "${IMAGE_NAME}" "${INST_DRV}" || \
+		return 1
+	fi
+
+	if is_onie_boot; then
+		MASTER_GRUB_DIR="${WRITE_ROOT}/boot/grub-master/boot/grub"
+		becho "Setting up master GRUB for chainloading Vyatta and ONIE"
+		install -m755 -d "${WRITE_ROOT}/boot/grub-master/boot/grub"
+		if [[ $VII_ENABLE_GRUB_PASSWORD == ^[Yy] ]]; then
+        run_command \
+            ${vyatta_sbindir}/vyatta_update_grub.pl --build-onie=${VII_CONSOLE},${VII_CONSOLE_SPEED},${VII_GRUB_USERNAME},${VII_GRUB_PASSWORD},"${WRITE_ROOT}/boot/grub-master/boot/grub/grub.cfg"
+		else
+        run_command \
+            ${vyatta_sbindir}/vyatta_update_grub.pl --build-onie=${VII_CONSOLE},${VII_CONSOLE_SPEED},,,"${WRITE_ROOT}/boot/grub-master/boot/grub/grub.cfg"
+		fi
+
+		run_command grub-install --no-floppy --recheck \
+			--root-directory=${WRITE_ROOT}/boot/grub-master /dev/${INST_DRV} 2>&1
+	fi
+
+	exec 1>&3       # restore stdout
+	exec 3>&-       # close fd 3
+
+	INSTALL_ROOT_DIR=${WRITE_ROOT}
+	return 0
+    elif [ -d "${ROOT}" ] ; then
+	if [ -d ${ROOT}/boot/${IMAGE_NAME} ] &&
+	    [[ ${VII_IMAGE_REPLACE} == Y* ]] ; then
+	    # TODO Instead of removing old image, keep it throughout the
+	    # installation process in case of failure. Revert back if there's
+	    # any trouble. VRVDR-12511
+	    run_command rm -fr ${ROOT}/boot/${IMAGE_NAME}
+	fi
+
+	# Don't accidently unmount a mountpoint so lets bind the path first
+	INSTALL_ROOT_DIR=$(mktempdir rootfs)
+	if ! try_mount "--bind --make-private ${ROOT} ${INSTALL_ROOT_DIR}"; then
+	    fail_exit '${ROOT}: Cannot bind installation root directory.'
+	fi
+	return 0
+    elif [ -f "${ROOT}" ] ; then
+	# losetup
+	return 1
+    elif [ -b "${ROOT}" ] ; then
+	# mkfs and mount
+	return 1
+    else
+	becho "${ROOT}: No such file or directory" >&2
+	return 1
+    fi
+}
+
+#
+# Mount a specific image underneath ${WRITE_ROOT} so that the post-install
+# scripts find what they expect.
+#
+mount_filesystems_for_post_install ()
+{
+    local ROOT=${1}       # aka INST_ROOT
+    local image_name=${2}
+
+    # remember this for later (after overlay mount)
+    local ROOTFS_DEV=$(what_is_mounted_on ${ROOT})
+
+    # some helper variables
+    local unionrw_dir="${ROOT}/$(get_image_persistence_path_from_rootfs ${image_name} ${ROOT})"
+    local upper_dir="${ROOT}/$(get_image_upperdir_path_from_rootfs ${image_name} ${ROOT})"
+    local mnt_dir="/lib/live/mount"
+
+    local squashfs_dir="${unionrw_dir}${mnt_dir}/rootfs/${image_name}.squashfs"
+    install -m755 -d ${squashfs_dir} || \
+	fail_exit 'Failed to set up mountpoint for squashfs image.'
+
+    local target_squash="${ROOT}/boot/${image_name}/${image_name}.squashfs"
+    if ! try_mount "-o loop,ro -t squashfs $target_squash $squashfs_dir"; then
+	fail_exit 'Failed to mount new squashfs image.'
+    fi
+
+    if grep -q overlayfs /proc/filesystems; then
+	OVERLAYFS_NAME="overlayfs"
+    else
+	OVERLAYFS_NAME="overlay"
+    fi
+
+    local margs=$(gen_mopts $OVERLAYFS_NAME ${unionrw_dir} ${squashfs_dir} ${ROOT})
+    if ! try_mount "$margs"; then
+	fail_exit 'Failed to set up root directory for postinst.'
+    fi
+
+    #
+    # now mount the low-level filesystem so that post-install can get access
+    # to the pure (non-overlayed) /boot and /boot/grub directory
+    #
+    local LIVE_ROOTFS="${ROOT}${mnt_dir}/persistence/${ROOTFS_DEV##*/}"
+    install -m755 -d ${LIVE_ROOTFS} || \
+	fail_exit 'Failed to set up mountpoint for live rootfs.'
+    if ! try_mount "${ROOTFS_DEV} ${LIVE_ROOTFS}"; then
+	fail_exit 'Failed to mount live rootfs.'
+    fi
+
+    install -m755 -d "${ROOT}/boot" || \
+	fail_exit 'Failed to set up mountpoint for /boot.'
+    if ! try_mount "-o bind ${LIVE_ROOTFS}/boot/${image_name} ${ROOT}/boot"; then
+	fail_exit 'Failed to bind mount /boot.'
+    fi
+
+    #
+    # When installing the first image to a new created partition the
+    # boot-loader might not be installed yet. Therefore we create both the
+    # source directory and the mountpoint.
+    #
+    install -m755 -d "${LIVE_ROOTFS}/boot/grub" "${ROOT}/boot/grub" || \
+	fail_exit 'Failed to set up mountpoint for /boot/grub.'
+    if ! try_mount "-o bind ${LIVE_ROOTFS}/boot/grub ${ROOT}/boot/grub"; then
+	fail_exit 'Failed to bind mount /boot/grub.'
+    fi
+
+}
+
+umount_filesystems_for_post_install ()
+{
+    local ROOT=${1}       # aka INST_ROOT
+    local image_name=${2}
+
+    local ROOTFS_DEV=$(what_is_mounted_on ${ROOT} | egrep -v 'overlay|overlayfs')
+    local mnt_dir="/lib/live/mount"
+    local LIVE_ROOTFS="${ROOT}${mnt_dir}/persistence/${ROOTFS_DEV##*/}"
+
+    local image_dir="${ROOT}/boot/${image_name}/"
+    local rw_dir="${image_dir}$(get_live_persistence_label)"
+    local squashfs_dir="${rw_dir}${mnt_dir}/rootfs/${image_name}.squashfs"
+
+    run_command umount -d "${ROOT}/boot/grub"
+    run_command umount -d "${ROOT}/boot"
+    run_command umount -d "${LIVE_ROOTFS}"
+
+    # undo overlay
+    run_command umount -d "${ROOT}"
+    run_command umount -d "${squashfs_dir}"
+    run_command umount -d "${ROOT}"
+}
+
+# create new administrator account
+create_admin_account () {
+    local cfg_file=${1}
+    local root=${2}
+
+    becho "Creating admin account for user [$VII_ADMIN_USERNAME]"
+
+    if ! ${vyatta_sbindir}/vyatta_create_account --admin=${VII_ADMIN_USERNAME} \
+	    --cfgfile=$cfg_file; then
+            fail_exit "Failed to create new admin account."
+    fi
+
+    set_encrypted_password "${VII_ADMIN_USERNAME}" "${VII_ADMIN_PASSWORD}" "$cfg_file"
+
+    # We also take the liberty of setting password manually in case the 
+    # config does not apply. I decided to not make this a postinstall 
+    # script so that we don't expose the VII_ADMIN_PASSWORD variable 
+    # to the postinstall script infrastructure. Also, do not use run_command
+    # as it will out the encrypted password to the install log..
+
+    useradd --root $root --home-dir /home/${VII_ADMIN_USERNAME} -m \
+        --groups vyattacfg,vyattaadm,wireshark,systemd-journal \
+        --password ${VII_ADMIN_PASSWORD} --shell /bin/vbash ${VII_ADMIN_USERNAME}
+
+    # we don't need this variable anymore
+    unset VII_ADMIN_PASSWORD
+}
+   
+create_admin_grub_account () {
+    local username=${1:?No username}
+    local password=${2:?No password}
+    local cfg_file=${3:?No vyatta cfg file}
+    local grub_cfg=${4:?No grub cfg file}
+
+    becho "Creating grub account for user [$username]"
+
+    # UBAC's
+    #
+    # Populate config.boot
+    if ! ${vyatta_sbindir}/vyatta_update_grub.pl --create-vy-grub-ubac=$username,$password,$cfg_file; then
+        fail_exit "Failed to add grub account to vyatta config."
+    fi
+}
+
+_get_admin_settings () {
+    while true; do
+        echo -en "\nEnter username for administrator account [$VII_ADMIN_USERNAME]: "
+        VII_ADMIN_USERNAME=$(get_response_raw "$VII_ADMIN_USERNAME")
+
+        if ! ${vyatta_sbindir}/vyatta_check_username.pl "$VII_ADMIN_USERNAME"; then
+            continue
+        fi
+
+        echo -e "\nEnter password for administrator account"
+        get_password "$VII_ADMIN_USERNAME"
+        break
+    done
+}
+
+_get_admin_grub_settings () {
+    while true; do
+        echo -en "Would you like to setup a grub password? (Yes/No) [$VII_ENABLE_GRUB_PASSWORD]: "
+        VII_ENABLE_GRUB_PASSWORD=$(get_response "$VII_ENABLE_GRUB_PASSWORD" "Yes No Y N")
+
+        if [[ $VII_ENABLE_GRUB_PASSWORD =~ ^[Yy] ]]; then
+            echo -en "Enter username [$VII_GRUB_USERNAME]: "
+            VII_GRUB_USERNAME=$(get_response_raw "$VII_GRUB_USERNAME")
+            echo -en "Enter admin Grub password: "
+            VII_GRUB_PASSWORD=$(_dialog_enter_password "$VII_GRUB_USERNAME" "plaintext")
+        fi
+        echo -en "Would you like to enable a reduced grub layout? (Yes/No) [$VII_GRUB_REDUCED]: "
+        VII_GRUB_REDUCED=$(get_response "$VII_GRUB_REDUCED" "Yes No Y N")
+        break
+    done
+}
+
+validate_console () {
+    [[ $1 =~ tty(S|USB)*[0-9]+ ]]
+}
+
+validate_speed () {
+    case $1 in
+        1200|2400|4800|9600|19200|38400|57600|115200)
+            return 0 ;;
+        *)
+            return 1 ;;
+    esac
+}
+
+detect_console () {
+    local tty="${vyatta_origin_tty#/dev/}"
+
+    if ! is_live_cd_boot && [[ -f /boot/grub/grubenv ]]; then
+	VII_CONSOLE=$(sed -n -e 's/boot_console=//p' < /boot/grub/grubenv 2>/dev/null)
+	VII_CONSOLE_SPEED=$(sed -n -e 's/serial_speed=//p' < /boot/grub/grubenv 2>/dev/null)
+    fi
+
+    case "$tty" in
+	tty[0-9])
+            echo tty0 #the livecd runs on tty1 which is an odd case
+	    ;;
+	''|"not a tty"|console|pts/*)
+	    #autoinstaller doesn't set vyatta_origin_tty
+
+	    # array of active consoles with default entry 'tty0'
+            local console=(
+		"tty0"
+		$(cat "${SHUNIT_TMPDIR}/sys/class/tty/console/active" \
+		      2>/dev/null)
+	    )
+	    echo "${console[-1]}"
+	    ;;
+	*)
+	    echo "$tty"
+	    ;;
+    esac
+
+    return 0
+}
+
+detect_console_speed () {
+    stty -F $1 speed 2>/dev/null
+}
+
+# setup console
+setup_console () {
+    local root=${1}
+    local cfg_file=${2}
+
+    lecho "$FUNCNAME" "Using console $VII_CONSOLE at $VII_CONSOLE_SPEED baud"
+
+    if ! ${vyatta_sbindir}/vyatta-postinstall-setup-console \
+             --root=$root --file=$cfg_file --console=$VII_CONSOLE --speed=$VII_CONSOLE_SPEED
+    then
+        fail_exit "Failed to setup console."
+    fi
+
+}
+
+_get_console_settings () {
+    while true; do
+        echo -n "Enter the desired system console [$VII_CONSOLE]: "
+        VII_CONSOLE=$(get_response_raw "$VII_CONSOLE")
+        if ! validate_console $VII_CONSOLE; then
+            continue
+        fi
+
+        # Return if a regular tty, no need to get speed.
+        if [[ $VII_CONSOLE =~ tty[0-9] ]]; then
+            VII_CONSOLE_SPEED=0
+            return
+        fi
+
+        echo -n "Enter the console speed [$VII_CONSOLE_SPEED]: "
+        VII_CONSOLE_SPEED=$(get_response_raw "$VII_CONSOLE_SPEED")
+        if ! validate_speed $VII_CONSOLE_SPEED; then
+            continue
+        fi
+        break
+    done
+}
+
+_save_image_config ()
+{
+    local SAVE_DIR="${1:?Missing parameter SAVE_DIR}"
+    local IMAGE_ROOT="${2:-/}"
+
+    if [ -f ${IMAGE_ROOT}/config/config.boot ] ; then
+        # Avoid mounted paths - we have to use to -exec in this case.
+        # as -xdev would not filter out first level mounted dirs.
+	run_command find ${IMAGE_ROOT}/config/ -maxdepth 1 -mindepth 1 \
+	    '!' -exec mountpoint -q '{}' ';' \
+            -exec cp '-ax' '{}' "${SAVE_DIR}/" ';'
+	chgrp -R vyattacfg ${SAVE_DIR}
+	chmod -R 775 ${SAVE_DIR}
+    fi
+
+    if ! is_live_cd_boot; then
+        run_command tar -cf ${SAVE_DIR}/dpconf.tar -C ${IMAGE_ROOT} \
+                    etc/vyatta/ \
+                    etc/network/interfaces etc/network/interfaces.d/
+    fi
+}
+
+_save_image_keys ()
+{
+    local SAVE_DIR="${1:?Missing parameter SAVE_DIR}"
+    local IMAGE_ROOT="$2"
+
+    run_command find ${IMAGE_ROOT}/etc/ssh/ -maxdepth 1 -mindepth 1 \
+	-name 'ssh_host_*' -exec cp '-a' '{}' "${SAVE_DIR}/" ';'
+
+    # reset modes on keys (should already be set)
+    chmod 600 ${SAVE_DIR}/*_key 2>&1
+    chmod 644 ${SAVE_DIR}/*.pub 2>&1
+}
+
+_convert_yes_no () {
+    local input=${1:?Need input}
+
+    if [[ $input =~ (^y(es)?$)|(^Y((ES)?|(es)?)$) ]]; then
+        echo 1
+    elif [[ $input =~ (^n(o)?$)|(^N((O)?|(o)?)$) ]]; then
+        echo 0
+    else
+        return 1;
+    fi
+    return 0;
+}
+
+#
+# Save the running system's config & ssh keys.
+#
+# There are two modes available:
+# 1. w/o argument it uses 'install-get-partition' style
+# 2. with argument it uses 'install-postinst-existing' style
+#
+# The vyatta-install-image uses the 'install-get-partition' style.
+#
+save_running_info () {
+    local cfg_dir=${1:+${1}/config}
+    local ssh_dir=${1:+${1}/etc/ssh}
+
+    : ${cfg_dir:=/mnt/config}
+    : ${ssh_dir:=/mnt/ssh}
+
+    # TODO: Remove this eventually
+    # Cleanup from possible partial last run
+    rm -fr /mnt/config && mkdir /mnt/config
+    rm -fr /mnt/ssh && mkdir /mnt/ssh
+
+    #
+    # Check to make sure we have enough space to copy the config and data dirs...
+    #
+    local space_avail=$(run_command df -k $(dirname ${cfg_dir}) 2>/dev/null | tail -1 | \
+	awk '{ print $4 }')
+    local space_needed_config=$(run_command du -x -s /config 2>/dev/null | awk '{ print $1 }')
+    if [ -z $space_needed_config ]; then
+        fail_exit "Something went wrong reading the /config dir"
+    fi
+    lecho "Available: ${space_avail} Needed: ${space_needed_config}"
+    if [ "$space_avail" -lt "$space_needed_config" ]; then
+	echo 'There is not enough space to save the current configuration directory.'
+	echo -n 'Would you like to continue without saving it? (Yes/No) [No]: '
+	local RESP=$(get_response "No" "Yes No Y N")
+	if [[ ${RESP} != Y* ]] ; then
+	    fail_exit "OK.  Exiting."
+	fi
+
+	becho "OK. Proceeding without saving current config directory."
+	return
+    fi
+
+    echo 'Would you like to save the current configuration '
+    echo -n 'directory and config file? (Yes/No) [Yes]: '
+    local RESP=$(get_response "Yes" "Yes No Y N")
+    if [[ ${RESP} == Y* ]] ; then
+	becho 'Saving current configuration...'
+	_save_image_config ${cfg_dir}
+
+	local DEMO_MIGRATE_SCRIPT=/opt/vyatta/sbin/demo-to-vse.pl
+	if [ -x $DEMO_MIGRATE_SCRIPT ]; then
+	    run_command $DEMO_MIGRATE_SCRIPT ${cfg_dir}/config.boot
+	fi
+    fi
+
+    if [ -d /etc/ssh ] ; then
+	echo 'Would you like to save the SSH host keys from your '
+	echo -n 'current configuration? (Yes/No) [Yes]: '
+	local RESP=$(get_response "Yes" "Yes No Y N")
+	if [[ ${RESP} == Y* ]] ; then
+	    becho 'Saving SSH keys...'
+	    _save_image_keys ${ssh_dir}
+	fi
+    fi
+}
+
+_get_config_settings () {
+    # Find the config files and give the user the option to choose one
+    local configs=( )
+
+    if ! is_live_cd_boot ; then
+	becho "Using image's default configuration file"
+	VII_IMAGE_CONFIG_BOOT="image:$vyatta_sysconfdir/config.boot.default"
+	return
+    fi
+
+    # First candidate: The config file on the running system.  Note
+    # that this will include any changes made and saved by the user,
+    # as well as changes such as interface MAC addresses automatically
+    # generated by the user.  So it is the first choice.
+    if [ -f "${VYATTA_NEW_CFG_DIR}/config.boot" ]; then
+	configs[${#configs[*]}]=${VYATTA_NEW_CFG_DIR}/config.boot
+    fi
+
+    # Second candidate: The default config file
+    if [ -f "$vyatta_sysconfdir/config.boot.default" ]; then
+	configs[${#configs[*]}]=$vyatta_sysconfdir/config.boot.default
+    fi
+
+    if [ ${#configs} -gt 0 ]; then
+	echo "I found the following configuration files:"
+	for file in ${configs[*]}; do
+	    echo "    $file"
+	done
+
+        local response=''
+        while [ -z "$response" ]; do
+            echo -n "Which one should I copy? [${configs[0]}]: "
+            response=$(get_response_raw "${configs[0]}")
+        done
+        if [ "$response" != "${configs[0]}" ] &&
+            [ "$response" != "${configs[1]}" ]; then
+            OPT_VYATTA_CONFIG='yes'
+            lecho "Using a user specified custom config... [$response]"
+        fi
+        VII_IMAGE_CONFIG_BOOT=$response
+    fi
+}
+
+# copy configuration to the config directory
+copy_config () {
+    local INST_ROOT=${1:-/}
+
+    local cfg_dir=${INST_ROOT}${VYATTA_NEW_CFG_DIR}
+    local grub_dir=${INST_ROOT}/boot/grub/
+
+    # create the config directory
+    install -m775 -gvyattacfg -d $cfg_dir
+
+    # create our config partition marker
+    touch $cfg_dir/.vyatta_config
+
+    #
+    # If saving previous configuration....
+    if [[ -n "$(ls -A /mnt/config 2>/dev/null)" ]]; then
+        echo "Copying saved configuration to config partition."
+
+        # First copy back any saved controller/dataplane config
+        if [ -e /mnt/config/dpconf.tar ]; then
+            run_command tar -xpf /mnt/config/dpconf.tar -C ${INST_ROOT}
+            rm /mnt/config/dpconf.tar
+        fi
+
+        run_command cp -aT /mnt/config $cfg_dir
+    #
+    # If creating a clean install with new config.
+    else
+        # Populate contents of fresh install with templates (from new image)
+        run_command cp -aT ${INST_ROOT}${VYATTA_CFG_DIR} $cfg_dir
+
+        echo "Copying ${VII_IMAGE_CONFIG_BOOT}..."
+	    VII_IMAGE_CONFIG_BOOT="${VII_IMAGE_CONFIG_BOOT##file:}"
+
+	    if [[ "${VII_IMAGE_CONFIG_BOOT##image:}" != \
+		"${VII_IMAGE_CONFIG_BOOT}" ]]; then
+		VII_IMAGE_CONFIG_BOOT="${INST_ROOT}${VII_IMAGE_CONFIG_BOOT##image:}"
+	    fi
+
+        # Fetch config by URL
+	    if [ "${VII_IMAGE_CONFIG_BOOT%%:*}" != \
+					"${VII_IMAGE_CONFIG_BOOT}" ]; then
+		    local LOCAL_VII_IMAGE_CONFIG_BOOT
+		    LOCAL_VII_IMAGE_CONFIG_BOOT=$(fetch_by_url \
+						"${VII_IMAGE_CONFIG_BOOT}" \
+						$cfg_dir/config.boot)
+		    [ -z "${LOCAL_VII_IMAGE_CONFIG_BOOT-}" ] &&
+			fail_exit "Error fetching ${VII_IMAGE_CONFIG_BOOT} to" \
+				  "config directory."
+		    VII_IMAGE_CONFIG_BOOT="${LOCAL_VII_IMAGE_CONFIG_BOOT}"
+        #
+        # Must be a local file
+	    else
+		    run_command cp -p ${VII_IMAGE_CONFIG_BOOT} $cfg_dir/config.boot ||
+		    fail_exit "Error copying file ${VII_IMAGE_CONFIG_BOOT} to" \
+			      "config directory."
+	    fi
+
+        # Don't create admin users if optional config is specified.
+        if ! is_opt_vyatta_config; then
+            # Disable root login
+            set_encrypted_password root "*" "$cfg_dir/config.boot"
+            create_admin_account "$cfg_dir/config.boot" "${INST_ROOT}"
+            # Setup grub account
+            if [[ $VII_ENABLE_GRUB_PASSWORD =~ ^[Yy] ]]; then
+                create_admin_grub_account "$VII_GRUB_USERNAME" "$VII_GRUB_PASSWORD" \
+                    "$cfg_dir/config.boot" "$grub_dir/grub.cfg"
+            fi
+            # Enable reduced grub menu
+            if [[ $VII_GRUB_REDUCED =~ ^[Yy] ]]; then
+                run_command ${vyatta_sbindir}/vyatta_update_grub.pl \
+                    --create-vy-grub-reduced=true,"$cfg_dir/config.boot"
+            fi
+        fi
+	fi
+
+
+    # set the permissions on the new config file
+    if [ -f "$cfg_dir/config.boot" ]; then
+	chgrp vyattacfg $cfg_dir/config.boot
+	chmod 775 $cfg_dir/config.boot
+    fi
+
+}
+
+#
+# This runs the mandatory post-install functions.
+#
+run_post_install ()
+{
+    lecho "Starting postinstall..."
+    local ROOT=$1
+    local IMAGE_NAME=$2
+
+    # Convert yes/no to true/false
+    local tmp="$(_convert_yes_no $VII_GRUB_REDUCED)"
+    if [[ $tmp == "" ]]; then
+        fail_exit "Must specify a valid VII_GRUB_REDUCED variable. It can be
+            either Yes/No [$VII_GRUB_REDUCED]"
+    fi
+
+    # Add grub entry
+    export INST_ROOT="${ROOT}"
+    export BOOT_DIR="${ROOT}"/boot
+    local index=0
+    local images="$(${vyatta_sbindir}/vyatta_update_grub.pl --list-images)"
+    if [[ -n $images ]]; then
+        images="$images,${IMAGE_NAME}"
+    else
+        images="${IMAGE_NAME}"
+    fi
+    lecho "Adding grub entry for ${IMAGE_NAME}"
+    if ! is_live_cd_boot; then
+        # We can use the wrapper script to generate the full grub config
+        # using the ubac's found in the vyatta config. Run as configd user
+        # to ensure we get unencrypted (un-starified ****) grub password.
+        run_command \
+            ${vyatta_sbindir}/lu --user configd -- \
+            ${vyatta_sbindir}/vyatta_update_grub.pl \
+            --generate-grub="${IMAGE_NAME//$'\n'/}"
+
+        # Set default boot index
+        run_command \
+            ${vyatta_sbindir}/vyatta_update_grub.pl \
+                --set-default-boot-index="${IMAGE_NAME//$'\n'/}"
+    elif [[ $VII_ENABLE_GRUB_PASSWORD =~ ^[Nn][Oo]?$ ]]; then
+        params="$tmp,"
+        params+="$index,"
+        params+=","
+        params+=","
+        params+="${BOOT_DIR}/grub/grub.cfg,"
+        params+="/opt/vyatta/etc/grub/default-union-grub.template,"
+        params+="$images"
+        run_command \
+            ${vyatta_sbindir}/vyatta_update_grub.pl \
+            --build-grub="$params"
+    else
+        params="$tmp,"
+        params+="$index,"
+        params+="${VII_GRUB_USERNAME},"
+        params+="${VII_GRUB_PASSWORD},"
+        params+="${BOOT_DIR}/grub/grub.cfg,"
+        params+="/opt/vyatta/etc/grub/default-union-grub.template,"
+        params+="$images"
+        run_command \
+            ${vyatta_sbindir}/vyatta_update_grub.pl \
+            --build-grub="$params"
+    fi
+
+    # Copy the default config files or ones saved from install-get-partition
+    copy_config "${ROOT}"
+
+    # Copy saved SSH host keys
+    if [ -d /mnt/ssh ]; then
+	    becho "Copying saved SSH host keys."
+	    run_command rsync -a /mnt/ssh/ ${ROOT}/etc/ssh
+    fi
+
+    # Copy installed licenses
+    if [ -d /config/vyatta ]; then
+        run_command rsync -a /config/vyatta/ ${ROOT}/config/vyatta/
+    fi
+
+    setup_console "${ROOT}" "${VYATTA_NEW_CFG_DIR}/config.boot"
+}
+
+run_post_install_hooks ()
+{
+    local INST_ROOT=$1
+    local IMAGE_NAME=$2
+    local WRITE_ROOT=${3:-${INST_ROOT}}
+
+    lecho "Executing postinstall hooks"
+
+    # export our installer variables for postinstall hooks
+    for i in $(compgen -A variable | grep -E '^VII_'); do
+        lecho "export $i: ${!i}"
+        export $i
+    done
+
+    local PI_SCRIPT=(
+	$(ls ${INST_ROOT}${vyatta_sysconfdir}/install-image/postinst \
+	    /opt/vyatta/etc/install-system/postinst 2>/dev/null) )
+    if [ -e "${PI_SCRIPT-}" ]; then
+	becho "Running post-install script..."
+	output=$($PI_SCRIPT "$INST_ROOT" "$WRITE_ROOT" 2>&1)
+	lecho "$output"
+    fi
+
+    # new postinstall infrastructure
+    local ENV_DIR=$(mktempdir postinstall)
+    for script in $(run-parts --list ${vyatta_datadir}/postinstall.d); do
+	if [ ! -x "${script}" ]; then
+	    lecho "${script} not executable"
+	    continue
+	fi
+
+	local env_file=${ENV_DIR}/$(basename ${script})
+	lecho "${script}"
+
+	# configure postinstall script environment
+	run_command ${script} configure > ${env_file} 2>/dev/null
+
+	# run postinstall scripts in their configured environment
+	run_command env $(cat ${env_file} | xargs) ${script} run ${INST_ROOT} ${IMAGE_NAME} 2>/dev/null
+    done
+}
+export -f run_post_install_hooks
+
+run_pre_install_hooks ()
+{
+    local CD_ROOT="${1:?Missing parameter CD_ROOT}"
+
+    lecho "Executing preinstall hooks"
+    local ENV_DIR=$(mktempdir preinstall)
+    for script in $(run-parts --list ${vyatta_datadir}/preinstall.d); do
+	if [ ! -x "${script}" ]; then
+	    lecho "${script} not executable"
+	    continue
+	fi
+
+	local env_file=${ENV_DIR}/$(basename ${script})
+	lecho "${script}"
+
+	# configure preinstall script environment
+	${script} configure > ${env_file}
+
+	# run preinstall scripts in their configured environment
+	env $(cat ${env_file} | xargs) ${script} run ${CD_ROOT}
+    done
+}
+
+check_install_source ()
+{
+    local CD_ROOT=${1}
+
+    # check squash image
+    local squash_file=$CD_ROOT/live/filesystem.squashfs
+    if [ ! -f "$squash_file" ] || ! (file $squash_file | grep -q Squashfs) \
+	|| ! grep -q '^ii  vyatta-version ' $CD_ROOT/live/packages.txt; then
+	fail_exit "\"$NEW_ISO\" is not a Vyatta ISO image file."
+    fi
+
+    # Verify checksums of all files in ISO image
+    if [ ! -f $CD_ROOT/md5sum.txt ]; then
+	fail_exit "MD5 checksum file is missing from ISO."
+    fi
+
+    echo -n "Checking MD5 checksums of files on the ISO image..."
+    resfile=`mktemp /tmp/install-image-md5check-XXXXXXXX`
+    (cd $CD_ROOT ; md5sum -c md5sum.txt > $resfile)
+    failures=`grep -v 'OK$' $resfile | wc -l`
+    rm -f $resfile
+    if [ $failures == 0 ]; then
+	echo "OK."
+    else
+	echo "Failed!"
+	echo "$failures checksum failures found!"
+	echo "ISO image is corrupted and can not be used."
+	exit 1
+    fi
+    lecho "$(cat $CD_ROOT/md5sum.txt)"
+
+    run_pre_install_hooks $CD_ROOT
+}
+
+
+MKTEMPDIR_ROOT_DIR=$(mktemp -d -t $(basename $0).XXXXXXXX) || exit 1
+export MKTEMPDIR_ROOT_DIR
+
+#
+# This is a helper to create directories below a toplevel temporary directory.
+# One can retrieve the toplevel directory by calling it without arguments.
+#
+mktempdir ()
+{
+    local DIRNAME=$1
+
+    [ -z "${MKTEMPDIR_ROOT_DIR}" ] && fail_exit "$FUNCNAME: Fatal error!"
+
+    if [ -n "${DIRNAME}" ] ; then
+	mkdir -p ${MKTEMPDIR_ROOT_DIR}/${DIRNAME}
+    fi
+
+    echo ${MKTEMPDIR_ROOT_DIR}/${DIRNAME}
+}
+
+_check_iso_signature ()
+{
+    local FILENAME=${1:?Required parameter FILENAME}
+    local KEYRING=${2:-/etc/apt/trusted.gpg}
+
+    echo "Checking digital signature..."
+    run_command gpg --keyring ${KEYRING} --verify ${FILENAME}
+    if [ $? -eq 0 ] ; then
+	echo "Valid digital signature found."
+	return
+    fi
+
+    echo "Signature check FAILED."
+    echo -n "Do you want to continue anyway? (yes/no) [no] "
+    local RESP=$(get_response "No" "Yes No Y N")
+    if [[ ${RESP} != Y* ]]; then
+	fail_exit 'OK.  Installation will not be performed.'
+    fi
+
+    becho "OK. Proceeding with installation anyway."
+}
+
+#
+# Returns an absolute path to the ISO received from URL on success.
+#
+fetch_iso_by_url ()
+{
+    local TEMP_DIR=${1:?Requires argument}
+    local URL=${2:?Requires argument}
+    local URL_USERNAME=${3-}
+    local URL_PASSWORD=${4-}
+
+    local URL_SCHEME=${URL%%:*}
+    case "${URL_SCHEME}" in
+	http|https|ftp|tftp|scp)
+	    ;;
+	*)
+	    becho "$FUNCNAME: Unsupported URL scheme: ${URL_SCHEME}" >&2
+	    return 1
+	    ;;
+    esac
+
+    #
+    # the rest might prompt the user interactively so we need to make it
+    # output where the user can see it
+    #
+    exec 3>&1   # save stdout to fd 3
+    exec 1>&2   # redirect stdout to stderr
+
+    local AUTH=${URL_USERNAME:+-u ${URL_USERNAME}:${URL_PASSWORD}}
+    local CLIENT_HDR='-HVyatta-Client: install-image'
+    CLIENT_HDR+=" -HVyatta-Version: $(get_vyatta_version)"
+
+    local FILENAME="${TEMP_DIR}/${URL##*/}"
+
+    lecho "DEBUG: curl ${CLIENT_HDR} ${AUTH} -f -o ${FILENAME} ${URL}"
+    curl "${CLIENT_HDR}" ${AUTH} -f -o "${FILENAME}" "${URL}"
+    local CURL_ERROR=$?
+
+    lecho "DEBUG: CURL_ERROR=${CURL_ERROR}"
+
+    if [ ${CURL_ERROR} -ne 0 ] ; then
+	rm -f "${FILENAME}"
+	exec 1>&3   # restore stdout
+	exec 3>&-
+	return 1
+    fi
+
+    lecho "DEBUG: curl --silent ${CLIENT_HDR} ${AUTH} -f -o ${FILENAME}.asc ${URL}.asc"
+    curl --silent "${CLIENT_HDR}" ${AUTH} -f -o "${FILENAME}.asc" "${URL}.asc"
+    CURL_ERROR=$?
+    lecho "DEBUG: CURL_ERROR=${CURL_ERROR}"
+    if [ ${CURL_ERROR} -ne 0 ]; then
+	rm -f "${FILENAME}.asc"
+    fi
+
+    lecho "Using downloaded ISO: ${FILENAME}"
+    exec 1>&3   # restore stdout
+    exec 3>&-
+    echo ${FILENAME}
+    return 0
+}
+
+fetch_by_url ()
+{
+    local url=${1?Requires argument}
+    local filename=${2:-${url##*/}}
+
+    local url_scheme="${url%%:*}"
+    local retries=3
+    local curl_error
+
+    case "${url_scheme}" in
+	http|https|ftp|tftp)
+	    ;;
+	("${url}"|file)
+	    # nothing to do in this case
+	    echo "${url##file:}"
+	    return 0
+	    ;;
+	*)
+	    becho "$FUNCNAME: Unsupported URL scheme: ${url_scheme}" >&2
+	    return 1
+	    ;;
+    esac
+
+    # FIXME: authentication currently not supported
+    local auth=""
+    local client_hdr='-HVyatta-Client: install-image'
+    client_hdr+=" -HVyatta-Version: $(get_vyatta_version)"
+
+    exec 3>&1   # save stdout to fd 3
+    exec 1>&2   # redirect stdout to stderr
+    lecho "DEBUG: curl ${client_hdr} ${auth} -f -o ${filename} ${url}"
+    while [ $retries -gt 0 ]; do
+        curl --silent "${client_hdr}" ${auth} -f -o "${filename}" "${url}"
+        curl_error=$?
+        if [ $curl_error -eq 0 ]; then
+            break
+        fi
+        retries=$((retries - 1))
+        if [ $retries -gt 0 ]; then
+            sleep 5
+        fi
+    done
+    exec 1>&3   # restore stdout
+    exec 3>&-
+
+    [ ${curl_error} -eq 0 ] && echo "${filename}"
+    return ${curl_error}
+}
+
+prepare_install_source ()
+{
+    local INSTALL_SOURCE_DIR=$1
+    local URL=$2
+    local USERNAME=${3-}
+    local PASSWORD=${4-}
+
+    # take care of file URL schema early on
+    URL=${URL##file:}
+
+    export ISO_PATH="${URL}"
+
+    if [ "${URL%%:*}" != "${URL}" ] ; then
+	echo "Trying to fetch ISO file from ${URL}"
+	ISO_PATH=$(fetch_iso_by_url ${INSTALL_SOURCE_DIR} ${URL} \
+	    ${USERNAME} ${PASSWORD}) || \
+	    fail_exit "Unable to fetch the ISO image from ${URL}"
+	echo "ISO download succeeded."
+    fi
+
+    if [ -e "${ISO_PATH}.asc" ] ; then
+	_check_iso_signature "${ISO_PATH}.asc"
+    fi
+
+    if [ ! -f "${ISO_PATH}" ] || ! (file --keep-going ${ISO_PATH} | grep -q 9660); then
+	fail_exit "${ISO_PATH}: Not a valid ISO image file."
+    fi
+
+    if ! try_mount "-o loop,ro ${ISO_PATH} ${INSTALL_SOURCE_DIR}"; then
+	fail_exit "${ISO_PATH}: Failed to mount the new image."
+    fi
+}
+
+#
+# Parse a vyatta-install-image configuration file
+#
+# The configuration file provides default answers for the installation that
+# are used as defaults. The variable in the configuration file need to start
+# with the prefix VII_*:
+#
+# VII_IMAGE_NAME=test
+# VII_ADMIN_USERNAME=vyatta
+# AN_IGNORED_VARIABLE=test
+#
+# NOTE: This function does NOT read from stdin on purpose! By forcing the use
+#       of a file we can check for shellcode before parsing it.
+#
+parse_vii_config ()
+{
+    local config_file="${1?$FUNCNAME requires an argument}"
+
+    # sanity checks for the configuration file
+    if [ ! -f "$config_file" ]; then
+	becho "error parsing \"${config_file}\": No such file" >&2
+	return 1
+    fi
+
+    if [ ! -r "$config_file" ]; then
+	becho "error parsing \"${config_file}\": Permission denied" >&2
+	return 1
+    fi
+
+    if grep -Eqv '^#|^[^ ]*=[^;&]*$|^[[:space:]]*$' "$config_file"; then
+	becho "error parsing \"${config_file}\": "\
+            "config file is unclean" >&2
+	return 1
+    fi
+
+    lecho "reading from ${config_file}"
+
+    local key value
+    while read key value; do
+	if [[ $key != VII_* ]]; then
+	    continue
+	fi
+	lecho "$key='$value'"
+	declare -g $key="$value"
+	export $key
+    done < <(cat ${config_file} | sed -e 's/=/ /')
+}
+
+#
+# Checks if partition with $label alrady exists
+#
+check_for_existing_partition ()
+{
+  local drive=$1
+  local label=$2
+  local output=$(parted --script /dev/$drive p | awk '{ print $6 }' | grep "$label")
+  if [ -z $output ]; then
+    echo 0
+  else
+    echo 1
+  fi
+}
+
+get_underlying () {
+    local by_linux=${1:?Missing linux disk label}
+    local output=$(lsblk $by_linux -o kname --noheadings | head -n 1)
+    echo $output
+}
+
+# This function takes care of setting the space requirements for
+# helper partitions such as ESP, BIOS-BOOT and ONIE-BOOT. This needs
+# to happen before we calculate the space for all other partitions.
+validate_boot_partition_sizes () {
+    if is_onie_boot; then
+        # Get size of ONIE-BOOT partition
+        local onie_disk=$(get_underlying /dev/disk/by-partlabel/ONIE-BOOT)
+        VII_ONIEBOOT_SIZE=$(get_drive_size $onie_disk)
+    fi
+
+    if [[ -d /sys/firmware/efi ]]; then
+        if [[ $VII_ESP_PART_SIZE -eq 0 ]]; then
+            VII_ESP_PART_SIZE=512
+            VII_BOOT_PART_SIZE=0
+        fi
+    # If vii_boot_part_size is higher than 0, someone must have
+    # manually set it, thus don't overwrite.
+    elif [[ $VII_BOOT_PART_SIZE -eq 0 \
+        && $VII_DISK_LABEL == 'gpt' ]]; then
+        VII_BOOT_PART_SIZE=256
+        VII_ESP_PART_SIZE=0
+    # Neither BOOT or ESP are needed for msdos
+    elif [[ $VII_DISK_LABEL == 'msdos' ]]; then
+        VII_BOOT_PART_SIZE=0
+        VII_ESP_PART_SIZE=0
+    fi
+
+    if [[ $VII_DISK_LABEL == 'gpt' ]]; then
+        if [[ -d /sys/firmware/efi ]]; then
+            if [[ $VII_ESP_PART_SIZE -lt $VII_ESP_PART_MIN ]]; then
+                echo "Failed"
+                fail_exit "Not enough space for the ESP partition. " \
+                      "Need at least ${VII_ESP_PART_MIN}MB."
+                
+            fi
+        elif [[ $VII_BOOT_PART_SIZE -lt $VII_BOOT_PART_MIN ]]; then
+            echo "Failed"
+            fail_exit "Not enough space for the BOOT partition. " \
+                  "Need at least ${VII_BOOT_PART_MIN}MB."
+        fi
+    fi
+}
+
+validate_partition_sizes () {
+
+    validate_boot_partition_sizes
+ 
+    # We use this variable to keep track of all the space still available
+    # after system helper partitions have been set up (i.e. esp, bios, onie, swap)
+    local disk_adj=0
+
+    # Make sure all devices in RAID are the same size
+    for array in "$VII_VROUT_ARRAY_DISKS" "$VII_LOGS_ARRAY_DISKS" "$VII_LIBVIRT_ARRAY_DISKS"; do
+        local devices=( $array )
+        local prev=""
+        for device in ${devices[@]//dev/}; do
+            local size=$(get_drive_size $device)
+            if [[ -z $prev ]]; then
+                prev=$size
+            elif [[ $prev -ne $size ]]; then
+                fail_exit "\nDrives in RAID are not all the same size."
+            else
+                prev=$size
+            fi
+        done
+    done
+
+    # If setting up a vRouter RAID, calculate actual space for vRouter partition
+    # and array size since each disks contains bootloaders, onie, or esp partition.
+    if [[ -n $VII_VROUT_ARRAY_DISKS ]]; then
+        local members=( $VII_VROUT_ARRAY_DISKS )
+        local disk_size=$(get_drive_size ${members[0]//dev/})
+        lecho "disk space: $disk_size"
+        disk_size=$(( $disk_size - $part_table ))
+        # We subtract partition table again for raid partition table.
+        local raid_partition_size=$(( $disk_size - $VII_ESP_PART_SIZE - $VII_BOOT_PART_SIZE - $VII_ONIEBOOT_SIZE - $part_table ))
+        lecho "DEBUG: individual raid partition size: $disk_size - \
+            $VII_ESP_PART_SIZE - $VII_BOOT_PART_SIZE - $VII_ONIEBOOT_SIZE"
+        lecho "DEBUG: individual raid partition size: $raid_partition_size"
+        # Set disk_adj to size of complete array for use in calculating extra
+        # partition sizes below
+        if [[ $VII_VROUT_ARRAY_TYPE -eq 1 ]]; then
+            disk_adj=$raid_partition_size
+        elif [[ $VII_VROUT_ARRAY_TYPE -eq 0 ]]; then
+            disk_adj=$(( $raid_partition_size * ${#members[@]} ))
+        elif [[ $VII_VROUT_ARRAY_TYPE -eq 5 ]]; then
+            disk_adj=$(( $raid_partition_size * $((${#members[@]} - 1)) ))
+        else
+            fail_exit "Unsupported raid type: $VII_VROUT_ARRAY_TYPE"
+        fi
+        lecho "raid size: $disk_adj"
+    else
+        local disk_size=$(get_drive_size $INSTALL_DRIVE)
+        lecho "disk space: $disk_size"
+        disk_size=$(( $disk_size - $part_table ))
+        disk_adj=$(( $disk_size - $VII_ESP_PART_SIZE - $VII_BOOT_PART_SIZE - $VII_ONIEBOOT_SIZE ))
+        lecho "remaining disk space for vyatta partitions: $disk_adj"
+    fi
+
+    # All calculations below should use disk_adj as that contains the remaining
+    # space available for use.
+    #
+
+    # Now calculate percentages
+    if [[ $VII_SWAP_PART_SIZE =~ [0-9]+% ]]; then
+        lecho "swap: $disk_adj x $VII_SWAP_PART_SIZE"
+        VII_SWAP_PART_SIZE=$(($disk_adj * ${VII_SWAP_PART_SIZE//%}/100))
+        lecho "swap: $VII_SWAP_PART_SIZE"
+    fi
+
+    if [[ $VII_VIRT_PART_SIZE =~ [0-9]+% ]]; then
+        lecho "virt: $disk_adj x $VII_VIRT_PART_SIZE"
+        VII_VIRT_PART_SIZE=$(($disk_adj * ${VII_VIRT_PART_SIZE//%}/100))
+        lecho "virt: $VII_VIRT_PART_SIZE"
+    fi
+    if [[ $VII_LOG_PART_SIZE =~ [0-9]+% ]]; then
+        lecho "log: $disk_adj x $VII_LOG_PART_SIZE"
+        VII_LOG_PART_SIZE=$(($disk_adj * ${VII_LOG_PART_SIZE//%}/100))
+        lecho "log: $VII_LOG_PART_SIZE"
+    fi
+    if [[ $VII_VYOS_PART_SIZE =~ [0-9]+% ]]; then
+        lecho "vrout: $disk_adj x $VII_VYOS_PART_SIZE"
+        VII_VYOS_PART_SIZE=$(($disk_adj * ${VII_VYOS_PART_SIZE//%}/100))
+    fi
+
+    # If we are running a vnf system, make sure we don't try to expand both
+    # virt and vyos partitions to use the rest of the disk.
+    if [[ $VII_VYOS_PART_SIZE -eq 0 && $VII_VIRT_PART_SIZE -eq 0 ]]; then
+        if is_vnf_system; then
+            fail_exit "Can't expand both VYOS and VIRT partition to rest of disk"
+        fi
+    fi
+
+    # If VII_VYOS_PART_SIZE is set to 0, use the rest of the disk
+    # for the root partition.
+    if [[ ${VII_VYOS_PART_SIZE} -eq 0 ]]; then
+        VII_VYOS_PART_SIZE=$(( $disk_adj \
+            - $VII_LOG_PART_SIZE \
+            - $VII_VIRT_PART_SIZE \
+            - $VII_SWAP_PART_SIZE \
+            - 10 )) # just to be safe
+        lecho "DEBUG: VII_VYOS_PART_SIZE=$disk_adj \
+            - $VII_LOG_PART_SIZE \
+            - $VII_VIRT_PART_SIZE \
+            - $VII_SWAP_PART_SIZE \
+            - 10"
+        lecho "DEBUG: VII_VYOS_PART_SIZE=$VII_VYOS_PART_SIZE"
+    fi
+    # If VII_VIRT_PART_SIZE is set to 0, use the rest of the disk
+    # for the root partition.
+    if [[ ${VII_VIRT_PART_SIZE} -eq 0 ]] && is_vnf_system; then
+        VII_VIRT_PART_SIZE=$(( $disk_adj \
+            - $VII_LOG_PART_SIZE \
+            - $VII_VYOS_PART_SIZE \
+            - $VII_SWAP_PART_SIZE \
+            - 10 )) # just to be safe
+        lecho "DEBUG: VII_VIRT_PART_SIZE=$disk_adj \
+            - $VII_LOG_PART_SIZE \
+            - $VII_VYOS_PART_SIZE \
+            - $VII_SWAP_PART_SIZE \
+            - 10"
+        lecho "DEBUG: VII_VIRT_PART_SIZE=$VII_VIRT_PART_SIZE"
+    fi
+
+    # Validate...
+    while true; do
+        # Include any boot helper partition in the vRouter size limit.
+        if [[ $(($VII_VYOS_PART_SIZE + $VII_ESP_PART_SIZE + $VII_BOOT_PART_SIZE)) \
+            -lt $VII_VYOS_PART_MIN && \
+                $VII_VYOS_PART_SIZE != 0 ]]; then
+            echo "Failed"
+            becho "Not enough space configured for VY_OS. "\
+                  "Need ${VII_VYOS_PART_MIN}MB for the vRouter."
+            break
+        fi
+
+        if [[ $VII_VROUT_ARRAY_DISKS ]]; then
+            # Do all partitions fit on the raid?
+            if [[ $(( $VII_SWAP_PART_SIZE \
+                + $VII_VYOS_PART_SIZE \
+                + $VII_LOG_PART_SIZE \
+                + $VII_VIRT_PART_SIZE )) -gt $disk_adj ]]; then
+                echo "Failed"
+                becho "Invalid partition sizes: Not enough space on RAID"
+                break
+            fi
+        else
+            # Are the partitions too big for the disk?
+            if [[ $(( $VII_BOOT_PART_SIZE \
+                + $VII_ESP_PART_SIZE \
+                + $VII_VYOS_PART_SIZE \
+                + $VII_LOG_PART_SIZE \
+                + $VII_VIRT_PART_SIZE \
+                + $VII_SWAP_PART_SIZE \
+                + $VII_ONIEBOOT_SIZE )) -gt $disk_size ]]; then
+                echo "Failed"
+                becho "Invalid partition sizes: Not enough space on disk"
+                break
+            fi
+        fi
+        lecho "VII_BOOT_PART_SIZE: $VII_BOOT_PART_SIZE"
+        lecho "VII_ESP_PART_SIZE: $VII_ESP_PART_SIZE"
+        lecho "VII_SWAP_PART_SIZE: $VII_SWAP_PART_SIZE"
+        lecho "VII_VYOS_PART_SIZE: $VII_VYOS_PART_SIZE"
+        lecho "VII_VIRT_PART_SIZE: $VII_VIRT_PART_SIZE"
+        lecho "VII_LOG_PART_SIZE: $VII_LOG_PART_SIZE"
+        lecho "VII_ONIEBOOT_SIZE: $VII_ONIEBOOT_SIZE"
+
+        return 0 # Validation passed
+    done
+
+    # Validation failed
+    return 1
+}
+
+print_partition_sizes () {
+    echo "VYOS:$VII_VYOS_PART_SIZE"
+    echo "ESP: $VII_ESP_PART_SIZE"
+    echo "BOOT: $VII_BOOT_PART_SIZE"
+    echo "VIRT: $VII_VIRT_PART_SIZE"
+    echo "LOG: $VII_LOG_PART_SIZE"
+    echo "SWAP: $VII_SWAP_PART_SIZE"
+    echo "ONIE: $VII_ONIEBOOT_SIZE"
+}
+
+skip_if_autoinstall () {
+    local func=( "$@" )
+    if [[ $VYATTA_PROCESS_CLIENT != 'yes' ]]; then
+       if [[ ${func[0]} == *"="* ]]; then
+               local key=$( echo ${func[0]} | cut -d'=' -f1 )
+               local value=$( echo ${func[0]} | cut -d'=' -f2 )
+               export $key=$value
+               return 0
+       fi
+       ${func[@]}
+    fi
+}
+
+# Check drives for previous configuration
+check_drives () {
+  local copied=0
+
+  becho "Checking drives for previous configurations..."
+
+  # Find the vRouter partition
+  local partitions=( $(lsblk_exclude_floppy --output KNAME,LABEL | \
+			   grep 'vRouter' | awk '{print $1}') )
+  mkdir -p /mnt/tmp &>/dev/null
+
+  for part in ${partitions[@]}; do
+      local dev_name=/dev/$part
+      wait_for_partprobe "$dev_name"
+      run_command mount -r "$dev_name" /mnt/tmp &>/dev/null
+      if [ $? != 0 ]; then
+        becho "Cannot mount $dev_name"
+        lecho "mount $dev_name /mnt/tmp"
+        lecho "$output"
+      else
+        save_old_info "$part" && copied=1 \
+            && VII_IMAGE_SAVE_CONFIG='No'
+        umount /mnt/tmp
+      fi
+  done
+
+  if [[ $copied -eq 1 ]]; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+## save_old_config 
+# Copy config files from /mnt/tmp to /mnt/config
+save_old_config() {
+  local part=$1
+  local response=''
+
+   # Look to see if there is a config partition there
+  while [ -z "$response" ]; do
+        echo "$part has an old configuration directory!"
+        echo -ne "Would you like me to save the data on it\nbefore I delete it? (Yes/No) [${VII_IMAGE_SAVE_CONFIG}]: "
+        response=$(get_response "${VII_IMAGE_SAVE_CONFIG}" "Yes No Y N")
+  done
+
+  if [[ "$response" == Y* ]]; then
+      mkdir -p /mnt/config
+      if [ -d /mnt/tmp/opt/vyatta/etc/config ]; then
+          output=$(cp -pR /mnt/tmp/opt/vyatta/etc/config/* /mnt/config)
+      else
+          output=$(cp -pR /mnt/tmp/* /mnt/config)
+      fi
+      if [ -n "$output" ]; then
+          echo -e "Warning: error in copying the old config partition.\nSee $INSTALL_LOG for more details."
+            lecho "Warning: error in copying the old config partition.\ncp -pR /mnt/tmp/* /mnt/config\n$output\n"
+      fi
+      rename_old_config
+  fi
+}
+
+# copy_ssh_keys
+# $1 srcdir $2 dstdir
+copy_ssh_keys () {
+    local output
+    mkdir -p $2
+    output=$(cp -p $1/ssh_host_* $2/)
+
+    if [ -n "$output" ]; then
+	becho "Warning: error in copying the old ssh keys."
+	becho "See $INSTALL_LOG for more details."
+	becho "cp -p $1/ssh_host_* $2/"
+	becho "$output\n"
+	return
+    fi
+
+    # reset modes on keys (should already be set)
+    chmod 600 $2/*_key 2>&1
+    chmod 644 $2/*.pub 2>&1
+    becho "SSH keys have been saved."
+}
+
+
+## save_old_keys
+# Copy SSH keys from /mnt/tmp/etc/ssh /mnt/ssh
+save_old_keys() {
+    local part=$1
+    local response=''
+
+    while [ -z "$response" ]
+    do
+        echo "$part has SSH host keys"
+        echo -ne "Would you like me to keep SSH keys on new install? (Yes/No) [Yes]: "
+        response=$(get_response "Yes" "Yes No Y N")
+    done
+
+    if [[ "$response" == Y* ]]; then
+	copy_ssh_keys "/mnt/tmp/etc/ssh" "/mnt/ssh"
+    else
+	echo "OK.  SSH keys not saved."
+    fi
+}
+
+rename_old_config() {
+  files=$(find /mnt/config -mindepth 1 -type f | grep -v pre-glendale)
+  for f in $files; do
+    if grep -q '/\*XORP Configuration File, v1.0\*/' $f >&/dev/null; then
+      CURTIME=$(date +%F-%H%M%S)
+      mv $f $f.pre-glendale.$CURTIME
+    fi
+  done
+}
+
+#
+# Return the persistence directory for a given image name.
+#
+# For backwards compatibility this supportes as well the persistence label
+# that was used with live-build < 3.x.
+#
+get_persistence_rw_path ()
+{
+    local base_path image_name
+    base_path=/mnt/tmp
+    image_name=${1}
+
+    echo ${base_path}$(get_image_persistence_path_from_rootfs "${image_name}" "${base_path}")
+}
+
+save_image_config() {
+    image_name=$1
+    
+    # Cleanup from possible partial last run
+    rm -fr /mnt/config
+    mkdir /mnt/config
+
+    output=$(cp -pR $(get_persistence_rw_path ${image_name})/config/* /mnt/config)
+
+    if [ -n "$output" ]; then
+        echo -e "Warning: error in copying the old config partition.\nSee $INSTALL_LOG for more details."
+        lecho "Warning: error in copying the old config partition.\ncp -pR /mnt/tmp/* /mnt/config\n$output\n"
+    fi
+    rename_old_config
+}
+
+save_image_keys() {
+    local image_name persistence_dir
+    image_name=$1
+    persistence_dir=$(get_persistence_rw_path ${image_name})
+
+    if [ ! -d ${persistence_dir}/etc/ssh ]; then
+	echo "No SSH keys found on $image_name, so none can be saved."
+	return
+    fi
+
+    echo -n "Would you like to save SSH keys from $image_name too? (Yes/No) [Yes] "
+
+    response=$(get_response "Yes" "Yes No Y N")
+    if [[ "$response" != Y* ]]; then
+	echo "OK. SSH keys not saved."
+	return
+    fi
+
+    lecho "Saving ssh keys from ${image_name}"
+    copy_ssh_keys "${persistence_dir}/etc/ssh" "/mnt/ssh"
+}
+
+save_old_info() {
+    local part=$1
+    local copied=0
+    
+    echo "Looking for config files from previous installations on $part..."
+
+    # Look to see if this is a disk-based installation config partition
+    if [ -f /mnt/tmp/opt/vyatta/etc/config/.vyatta_config ] \
+	|| [ -f /mnt/tmp/.vyatta_config ]; then
+ 		save_old_config $1
+		copied=1
+    fi
+
+    if [ -d /mnt/tmp/etc/ssh ];  then
+	save_old_keys $1
+	copied=1
+    fi
+
+    if [ $copied -eq 0 ]; then
+	# Check for images
+	images=()
+	image_dirs=/mnt/tmp/boot/*
+
+	for dir in $image_dirs; do
+	    local item
+	    item=${dir##/mnt/tmp/boot/}
+	    if [ -f "$(get_persistence_rw_path ${item})/config/.vyatta_config" ]
+	    then
+		images=($item ${images[@]})
+	    fi
+	done
+
+	num_images=${#images[@]}
+
+ 	if [ $num_images -gt 0 ]; then
+		echo "I found the following installed system image(s) with config files on $part:"
+		for (( i = 0; i < $num_images; i++ )); do
+			echo "  $((i + 1)): ${images[$i]}"
+		done
+
+		if [ $num_images -eq 1 ]; then
+		    echo -n "Would you like to save config information from it? (Yes/No) [${VII_IMAGE_SAVE_CONFIG}] "
+		else
+		    echo -n "Would you like to save config information from one? (Yes/No) [${VII_IMAGE_SAVE_CONFIG}] "
+		fi
+
+		response=$(get_response "${VII_IMAGE_SAVE_CONFIG}" "Yes No Y N")
+		if [[ "$response" != Y* ]]; then
+		    echo "OK.  Config information not saved."
+		    return 1
+		fi
+
+		if [ $num_images -gt 1 ]; then
+		    image_index=-1
+		    while [ $image_index -lt 0 -o $image_index -ge $num_images ];  do
+			echo -n "From which image would you like to save config information? (1 .. $num_images): "
+			num=$(get_response "1")
+			image_index=$((num - 1))
+		    done
+		else
+		    image_index=0
+		fi
+
+		image_name=${images[$image_index]}
+		echo "Saving config information from image $image_name."
+                lecho "Saving config from $image_name."
+		save_image_config $image_name
+		echo "Done."
+
+		save_image_keys $image_name
+        return 0
+	fi
+    return 1
+    fi
+}
+
+skip_if_chrooted () {
+    if [ -z "$vit_chrooted" ]; then
+        return 0
+    fi
+    return 1
+}
+
+is_vnf_system () {
+    grep -q 'vyatta-vnf' /etc/os-release && return 0
+    return 1
+}
+
+is_opt_vyatta_config () {
+    # config was recovered from HDD from previous installation
+    [ -n "$(ls -A /mnt/config 2>/dev/null)" ] && return 0
+    # optional config was specified via kcmd (vyatta-config=)
+    grep -q 'vyatta-config=' /proc/cmdline && return 0
+    # specified config is URL
+    if [ "${VII_IMAGE_CONFIG_BOOT%%:*}" != \
+        "${VII_IMAGE_CONFIG_BOOT}" ]; then
+        return 0
+    fi
+    # A custom config was specified in _get_config_settings()
+    [ -n "$OPT_VYATTA_CONFIG" ] && return 0
+    # is not custom config
+    return 1
+}

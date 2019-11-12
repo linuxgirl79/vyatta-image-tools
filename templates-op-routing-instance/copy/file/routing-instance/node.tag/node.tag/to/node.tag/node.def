@@ -1,0 +1,2 @@
+help: Copy files to specified destination
+run: chvrf ${4} ${vyatta_sbindir}/vyatta-image-tools.pl --copy ${5} ${7}

@@ -1,0 +1,263 @@
+Source: vyatta-image-tools
+Section: contrib/net
+Priority: optional
+Maintainer: Vyatta Package Maintainers <DL-vyatta-help@att.com>
+Build-Depends:
+ autoconf,
+ automake,
+ bc,
+ cpio,
+ debhelper (>= 10),
+ dh-yang,
+ gnupg,
+ libfile-slurp-perl,
+ libtemplate-perl,
+ ronn | ruby-ronn,
+ sharutils,
+ shunit2
+Standards-Version: 3.9.8
+
+Package: vyatta-image-tools
+Architecture: all
+Depends:
+ bc,
+ bsdmainutils,
+ cpio,
+ curl,
+ dmidecode,
+ dosfstools,
+ efibootmgr,
+ file,
+ gnupg,
+ grub-efi-amd64-bin,
+ grub-efi-ia32-bin,
+ grub-pc-bin,
+ grub2-common,
+ libio-prompt-perl,
+ libipc-run-perl,
+ libipc-run3-perl,
+ libnumber-bytes-human-perl,
+ libsys-syslog-perl,
+ libvyatta-live-perl,
+ lsof,
+ mdadm,
+ mtools,
+ openssh-client (>= 1:5.1p1-5),
+ parted,
+ procps (>= 1:3.2.7-3),
+ rsync,
+ tshark,
+ vyatta-base-systemd (>= 1.3),
+ vyatta-image-tools-initramfs-tools,
+ vyatta-system (>= 2.22),
+ ${misc:Depends},
+ ${perl:Depends},
+ ${shlibs:Depends}
+Pre-Depends: bash-completion
+Conflicts: vyatta-cfg-system (<< 1.5.24), vyatta-op (<= 0.15.21)
+Replaces: vyatta-cfg-system (<< 1.5.24)
+Description: Vyatta image management tools
+ Vyatta tools to manage system images
+
+Package: vyatta-image-tools-routing-instance
+Architecture: all
+Depends:
+ chvrf,
+ libvyatta-vrfmanager-sh,
+ vyatta-image-tools,
+ ${misc:Depends}
+Description: Vyatta routing-instance image management tools 
+ Vyatta tools to manage system images with routing-instance options
+
+Package: vyatta-image-tools-initramfs-tools
+Architecture: all
+Depends:
+ live-boot-initramfs-tools,
+ ${misc:Depends}
+Conflicts: live-boot-vyatta (<< 0.4)
+Description: Vyatta autoinstall initramfs-tools components.
+ Vyatta tools to manage initramfs-tools components
+
+Package: vyatta-image-v1-yang
+Architecture: all
+Breaks: vyatta-image-tools (<< 4.7)
+Replaces: vyatta-image-tools (<< 4.7)
+Depends:
+ libvyatta-cfgclient-perl,
+ libvyatta-live-perl,
+ vyatta-restclient-perl,
+ ${perl:Depends},
+ ${yang:Depends},
+ ${misc:Depends}
+Description: vyatta-image-v1 module
+ The YANG module for vyatta-image-v1
+
+Package: libvyatta-live-perl
+Architecture: all
+Section: contrib/perl
+Breaks: vyatta-image-tools (<< 4.7)
+Replaces: vyatta-image-tools (<< 4.7)
+Depends: ${perl:Depends}, ${misc:Depends}
+Description: Vyatta Live.pm module
+ Perl module for handling live images
+
+Package: vyatta-system-boot-loader-v1-yang
+Architecture: all
+Depends: vyatta-system,
+ vyatta-image-tools (>= 5.0),
+ vyatta-cfg,
+ ${misc:Depends},
+ ${yang:Depends}
+Description: vyatta-system-boot-loader-v1 module
+ Grub superuser configuration
+
+Package: vyatta-system-boot-loader-reduced-v1-yang
+Architecture: all
+Depends: vyatta-system,
+ vyatta-image-tools (>= 5.0),
+ ${misc:Depends},
+ ${yang:Depends}
+Description: vyatta-system-boot-loader-reduced-v1 module
+ SIAD reduced boot-loader
+
+Package: vyatta-op-add-system-v1-yang
+Architecture: all
+Depends: vyatta-system, ${misc:Depends}, ${yang:Depends}
+Description: vyatta-op-add-system-v1 module
+ Top level add system command definitions
+
+Package: vyatta-op-add-system-image-v1-yang
+Architecture: all
+Depends: vyatta-system,
+ vyatta-image-tools (>= 5.12),
+ ${misc:Depends},
+ ${yang:Depends}
+Description: vyatta-op-add-system-image-v1 module
+ Top level add system image command definitions
+
+Package: vyatta-op-clone-system-v1-yang
+Architecture: all
+Depends: vyatta-system, ${misc:Depends}, ${yang:Depends}
+Description: vyatta-op-clone-system-v1 module
+ Top level clone system command definitions
+
+Package: vyatta-op-clone-system-image-v1-yang
+Architecture: all
+Depends: vyatta-system,
+ vyatta-image-tools (>= 5.12),
+ ${misc:Depends},
+ ${yang:Depends}
+Description: vyatta-op-clone-system-image-v1 module
+ Top level clone system image command definitions
+
+Package: vyatta-op-copy-file-v1-yang
+Architecture: all
+Depends: vyatta-system,
+ ${misc:Depends},
+ ${yang:Depends}
+Description: vyatta-op-copy-file-v1 module
+ Top level clone system command definitions
+
+Package: vyatta-op-delete-file-v1-yang
+Architecture: all
+Depends: vyatta-system,
+ ${misc:Depends},
+ ${yang:Depends}
+Description: vyatta-op-delete-file-v1 module
+ Top level delete file command definitions
+
+Package: vyatta-op-delete-system-v1-yang
+Architecture: all
+Depends: vyatta-system,
+ ${misc:Depends},
+ ${yang:Depends}
+Description: vyatta-op-delete-system-v1 module
+ Top level delete system command definitions
+
+Package: vyatta-op-delete-system-image-v1-yang
+Architecture: all
+Depends: vyatta-system,
+ vyatta-image-tools (>= 5.12),
+ ${misc:Depends},
+ ${yang:Depends}
+Description: vyatta-op-delete-system-image-v1 module
+ Top level delete system image command definitions
+
+Package: vyatta-op-install-image-v1-yang
+Architecture: all
+Depends: vyatta-system,
+ vyatta-image-tools (>= 5.12),
+ ${misc:Depends},
+ ${yang:Depends}
+Description: vyatta-op-install-image-v1 module
+ Top level install image command definitions. This
+ package is only available for the live-cd.
+
+Package: vyatta-op-rename-system-v1-yang
+Architecture: all
+Depends: vyatta-system,
+ ${misc:Depends},
+ ${yang:Depends}
+Description: vyatta-op-rename-system-v1 module
+ Top level rename system command definitions
+
+Package: vyatta-op-rename-system-image-v1-yang
+Architecture: all
+Depends: vyatta-system,
+ vyatta-image-tools (>= 5.12),
+ ${misc:Depends},
+ ${yang:Depends}
+Description: vyatta-op-rename-system-image-v1 module
+ Top level rename system image command definitions
+
+Package: vyatta-op-set-system-v1-yang
+Architecture: all
+Depends: vyatta-system,
+ ${misc:Depends},
+ ${yang:Depends}
+Description: vyatta-op-set-system-v1 module
+ Top level set system command definitions
+
+Package: vyatta-op-set-system-image-v1-yang
+Architecture: all
+Depends: vyatta-system,
+ vyatta-image-tools (>= 5.12),
+ ${misc:Depends},
+ ${yang:Depends}
+Description: vyatta-op-set-system-image-v1 module
+ Top level set system image command definitions
+
+Package: vyatta-op-show-file-v1-yang
+Architecture: all
+Depends: vyatta-system,
+ ${misc:Depends},
+ ${yang:Depends}
+Description: vyatta-op-show-file-v1 module
+ Top level show file command definitions
+
+Package: vyatta-op-show-log-image-v1-yang
+Architecture: all
+Depends: vyatta-system,
+ vyatta-image-tools (>= 5.12),
+ ${misc:Depends},
+ ${yang:Depends}
+Description: vyatta-op-show-log-image-v1 module
+ Top level show log image command definitions
+
+Package: vyatta-op-show-raid-v1-yang
+Architecture: all
+Depends: vyatta-system,
+ vyatta-image-tools (>= 5.12),
+ ${misc:Depends},
+ ${yang:Depends}
+Description: vyatta-op-show-raid-v1 module
+ Top level show raid command definitions
+
+Package: vyatta-op-show-system-image-v1-yang
+Architecture: all
+Depends: vyatta-system,
+ vyatta-image-tools (>= 5.12),
+ ${misc:Depends},
+ ${yang:Depends}
+Description: vyatta-op-show-system-image-v1 module
+ Top level show system image command definitions

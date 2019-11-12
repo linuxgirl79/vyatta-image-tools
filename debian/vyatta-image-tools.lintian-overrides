@@ -1,0 +1,2 @@
+# Since we just divert we don't add a manpage
+vyatta-image-tools binary: binary-without-manpage usr/sbin/update-grub

@@ -1,0 +1,3 @@
+help: Username for remote file transfer
+run: export VY_COPY_USER=${9}
+    chvrf ${4} ${vyatta_sbindir}/vyatta-image-tools.pl --copy ${5} ${7}

@@ -1,0 +1,41 @@
+#!/bin/bash
+#
+# configure image after installation
+#
+
+set -e
+
+: ${vyatta_prefix:=/opt/vyatta}
+: ${vyatta_exec_prefix:=$vyatta_prefix}
+: ${vyatta_sbindir:=${vyatta_exec_prefix}/sbin}
+
+source ${vyatta_sbindir}/vyatta-install-image.functions
+
+function configure_configure ()
+{
+    echo "VII_POSTINSTALL_CONFIGURE=${VII_POSTINSTALL_CONFIGURE:-false}"
+}
+
+function configure_run ()
+{
+    local root_dir=${1?Missing argument}
+    local image_name=${2?Missing argument}
+
+    $vyatta_sbindir/vyatta-postinstall-configure --root=$root_dir \
+        ${VII_POSTINSTALL_GRUB_OPTIONS:+--grub-options=${VII_POSTINSTALL_GRUB_OPTIONS}} \
+        ${VII_POSTINSTALL_SERVICES:+--services=${VII_POSTINSTALL_SERVICES}}
+}
+
+case "$1" in
+    configure)
+        configure_configure
+        ;;
+    run)
+        [ "${VII_POSTINSTALL_CONFIGURE}" = 'true' ] && configure_run $2 $3
+        ;;
+    *)
+        fail_exit "$0: unknown command: \"$1\""
+        ;;
+esac
+
+exit 0

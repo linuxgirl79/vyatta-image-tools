@@ -1,0 +1,36 @@
+# common editor and work files
+*.orig
+*.rej
+*#
+*~
+.*.swp
+*.[oa]
+*.l[oa]
+*.so
+*.libs
+*.deps
+.dirstamp
+
+# ignore generated files by autotools
+aclocal.m4
+INSTALL
+config/
+config.*
+configure
+Makefile.in
+Makefile
+autom4te.cache
+tests/Makefile.in
+tests/*.log
+
+#ignore built files
+src/upgrade_image
+
+# ignore debian build
+debian/files
+debian/vyatta-image-tools
+debian/*.log
+debian/*.substvars
+
+# ignore test results
+*.trs

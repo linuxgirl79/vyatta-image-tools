@@ -1,0 +1,29 @@
+vyatta-autoinstall(7) -- boot time parameter
+============================================
+
+## SYNOPSIS
+
+`vyatta-autoinstall` [=<URL>]
+
+## DESCRIPTION
+
+`vyatta-autoinstall` instructs the livecd boot to perform an installation
+after (auto-)login. The installation will automatically select the default
+for all prompts during installation. The optional <URL> argument allows to
+pass a data file to change the default answers of some installation prompts.
+
+The boot time parameter is passed via the Linux kernel as any other kernel
+boot time parameter or command-line option. This might require changing the
+configuration of the boot loader in use (e.g. grub or PXE server).
+
+## FILE FORMAT
+
+The installer configuration file is line-based and each line consists of
+exactly one parameter definition:
+
+`name = value`
+
+All parameter names start with the prefix `VII_`.
+
+List of supported installer parameters:
+

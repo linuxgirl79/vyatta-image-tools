@@ -1,0 +1,5 @@
+[Unit]
+Description=Vyatta Autoinstall Mode
+Requires=basic.target vyatta-autoinstall.service
+After=basic.target vyatta-autoinstall.service
+AllowIsolate=yes

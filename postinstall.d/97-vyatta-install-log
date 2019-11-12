@@ -1,0 +1,37 @@
+#!/bin/bash
+#
+# Vyatta installation logfile postinstall hook
+#
+
+set -e
+
+: ${vyatta_prefix:=/opt/vyatta}
+: ${vyatta_exec_prefix:=$vyatta_prefix}
+: ${vyatta_sbindir:=${vyatta_exec_prefix}/sbin}
+
+source "${vyatta_sbindir}/vyatta-install-image.functions"
+
+function install_log_run ()
+{
+    local root_dir=${1?Missing argument}
+    local image_name=${2?Missing argument}
+ 
+    lecho "Copying installation logfile to ${image_name}"
+    run_command mkdir -p "${root_dir}/var/log/vyatta"
+    run_command sync
+    run_command cp -f "${INSTALL_LOG}" "${root_dir}/var/log/vyatta"
+}
+
+case "$1" in
+    configure)
+	# no configuration for this postinstall script
+	;;
+    run)
+	install_log_run $2 $3
+	;;
+    *)
+	fail_exit "$0: unknown command: \"$1\""
+	;;
+esac
+
+exit 0

@@ -1,0 +1,49 @@
+#!/bin/bash
+#
+# Create necessary log files in the LOGS partition. Some programs
+# throw errors if they don't have their log file present.
+# FIXES: VRVDR-25775
+#
+
+set -e
+
+: ${vyatta_prefix:=/opt/vyatta}
+: ${vyatta_sbindir:=${vyatta_prefix}/sbin}
+
+source "${vyatta_sbindir}/vyatta-install-image.functions"
+
+# If logging to separate partition copy /var/log to partition
+copy_var_log ()
+{
+    if ! is_live_cd_boot; then
+        # Don't run on add system image
+        return 0
+    fi
+
+    local mnt_point=$(lsblk_exclude_floppy --output PARTLABEL,MOUNTPOINT | \
+			  grep 'LOGS' | awk '{print $2}')
+    if [[ -z "$mnt_point" ]]; then
+        # No logging partition
+        return 0
+    fi
+
+    # Don't try and copy if files(logs) are already there.
+    if ! [[ $(find $mnt_point/* -type f 2>/dev/null) ]]; then
+        lecho "Copying contents of /var/log/ to [$mnt_point]"
+        run_command rsync -a --ignore-existing /var/log/* "$mnt_point"
+    fi
+    run_command umount $mnt_point
+}
+
+case "$1" in
+    configure)
+	;;
+    run)
+    copy_var_log
+	;;
+    *)
+	fail_exit "$0: unknown command: \"$1\""
+	;;
+esac
+
+exit 0
