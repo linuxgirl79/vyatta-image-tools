@@ -1,0 +1,52 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-only
+
+# Copyright (c) 2019, AT&T Intellectual Property.
+# All Rights Reserved.
+
+# Copyright (c) 2014-2017 by Brocade Communications Systems, Inc.
+# All rights reserved.
+
+function usage ()
+{
+    echo "usage: $(basename ${0}) [function]"
+    echo ""
+    echo "Where function can be one of:"
+    source $(cd $(dirname ${0}) && pwd -P)/$(basename ${0}).functions
+    compgen -A function | grep -v usage
+}
+
+# helper variable to defer processing of 'set -x' right before we eval
+OPT_X=""
+
+while getopts ":x" OPT ; do
+    case ${OPT} in
+	x)
+	    OPT_X="set -x"
+	    ;;
+	\?)
+	    echo "Invalid option: -$OPTARG" >&2
+	    ;;
+    esac
+done
+
+shift $((OPTIND-1))
+
+if [ $# -lt 1 ] ; then
+    usage
+    exit 1
+fi
+
+source $(cd $(dirname ${0}) && pwd -P)/$(basename ${0}).functions
+
+CMD=${1}
+shift
+
+# if this command does not exist lets print usage and exit
+if [ -z "$(typeset -F ${CMD})" ] ; then
+    usage
+    exit 1
+fi
+
+${OPT_X}
+eval ${CMD} ${*}

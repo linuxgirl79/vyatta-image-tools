@@ -1,0 +1,95 @@
+#!/usr/bin/perl
+# SPDX-License-Identifier: GPL-2.0-only
+
+# Copyright (c) 2019, AT&T Intellectual Property.
+# All Rights Reserved.
+
+# Copyright (c) 2017 by Brocade Communications Systems, Inc.
+# All rights reserved.
+
+use strict;
+use warnings;
+use lib "/opt/vyatta/share/perl5/";
+use Getopt::Long;
+use XorpConfigParser;
+
+my $config_boot = "/config/config.boot";
+my $grub_cfg    = "/boot/grub/grub.cfg";
+
+my @services;
+my $grub_options;
+
+sub setup_console {
+    my ( $file, $console, $unit, $speed ) = @_;
+    system("grub-editenv $file set boot_console=$console");
+    if ( defined $unit ) {
+        system("grub-editenv $file set serial_unit=$unit");
+    }
+    else {
+        system("grub-editenv $file unset serial_unit");
+    }
+    if ( defined $speed ) {
+        system("grub-editenv $file set serial_speed=$speed");
+    }
+    else {
+        system("grub-editenv $file unset serial_speed");
+    }
+}
+
+sub create_if_not_exists {
+    my ( $xcp, $path ) = @_;
+    my $node = $xcp->get_node($path);
+    if ( not defined $node ) {
+        $xcp->create_node($path);
+    }
+}
+
+sub configure_console {
+    my ( $root, $config_boot, $console, $speed ) = @_;
+    exit 1 if ( !defined($config_boot) );
+
+    my $file = "$root/boot/grub/grubenv";
+    return setup_console( $file, "tty0" )
+      if ( $console eq "tty0" );
+
+    my $unit = $1 if ( $console =~ /ttyS([0-3])/ );
+    setup_console( $file, $console, $unit, $speed );
+
+    my $xcp = new XorpConfigParser();
+    $xcp->parse("$root/$config_boot");
+    create_if_not_exists( $xcp,
+        [ 'system', 'console', 'device', $console, 'speed', $speed ] );
+    create_if_not_exists( $xcp,
+        [ 'system', 'console', "serial-boot-console", $console ] );
+
+    my $tmpfile = "/tmp/vyatta_postinstall_configure.$$";
+    open( my $tmpfh, '>', $tmpfile ) or exit 1;
+    select $tmpfh;
+    $xcp->output(0);
+    close $tmpfh;
+
+    my $ret = system("mv $tmpfile $root/$config_boot");
+    die "Unable to update $root/$config_boot\n" if ( $ret >> 8 );
+}
+
+sub usage {
+    die("Usage: $0 --root=dir --file=config.boot --console=con --speed=baud\n");
+}
+
+my ( $root, $file, $console, $speed );
+GetOptions(
+    "root=s"    => \$root,
+    "file=s"    => \$file,
+    "console=s" => \$console,
+    "speed=s"   => \$speed
+) or usage();
+
+usage()
+  if ( !defined($root)
+    || !defined($file)
+    || !defined($console)
+    || !defined($speed) );
+
+configure_console( $root, $file, $console, $speed );
+
+exit 0;

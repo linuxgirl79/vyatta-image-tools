@@ -1,0 +1,25 @@
+#!/bin/sh
+
+set -e
+
+pkg=vyatta-image-tools
+
+case "${1}" in
+    install|upgrade)
+	dpkg-divert --package ${pkg} --quiet --add --rename \
+	    --divert /usr/sbin/update-grub.grub2-common /usr/sbin/update-grub
+	;;
+
+    abort-upgrade)
+
+        ;;
+
+    *)
+        echo "preinst called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

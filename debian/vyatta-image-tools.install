@@ -1,0 +1,8 @@
+opt/vyatta/etc
+opt/vyatta/sbin
+opt/vyatta/share/vyatta-op/functions/tech-support.d
+opt/vyatta/share/postinstall.d
+opt/vyatta/share/preinstall.d
+usr
+lib/systemd/system/*
+lib/systemd/system-generators/*

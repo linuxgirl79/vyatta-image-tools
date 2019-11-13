@@ -1,0 +1,33 @@
+set default=0
+set timeout=5
+load_env
+
+serial --unit=[% global.item('console') %] [% IF global.item('console-speed') %]--speed=[% global.item('console-speed') %][% END %]
+terminal_input --append serial
+terminal_output --append serial
+
+[% IF global.item('ubac') == 'yes' %]
+set superusers="[% FOREACH user IN global.item('grub-users').item('user') %][% user.item('user-id') %] [% END %]"
+[% FOREACH user IN global.item('grub-users').item('user') %]
+password_pbkdf2 [% user.item('user-id') %] [% user.item('encrypted-password') %]
+[% END %]
+[% END %]
+
+if [ "$next_entry" = "ONIE" ]; then
+set default=ONIE
+set next_entry=
+save_env next_entry
+fi
+
+# Menu entry to chainload vRouter
+menuentry vRouter --unrestricted {
+ search --no-floppy --label --set=root vRouter
+ echo    'Loading vRouter ...'
+ chainloader +1
+}
+# Menu entry to chainload ONIE
+menuentry ONIE {
+ search --no-floppy --label --set=root ONIE-BOOT
+ echo    'Loading ONIE ...'
+ chainloader +1
+}

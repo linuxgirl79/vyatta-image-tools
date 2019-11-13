@@ -1,0 +1,20 @@
+[Unit]
+Description=Vyatta Autoinstaller
+Conflicts=shutdown.target
+Requires=basic.target config-loaded.target
+After=basic.target config-loaded.target
+Before=shutdown.target systemd-user-sessions.service
+
+[Service]
+Type=oneshot
+Environment=HOME=/root
+Environment="VYATTA_AUTOINSTALL_ARGS=-r auto -y"
+WorkingDirectory=/root
+ExecStart=-/opt/vyatta/sbin/vyatta-install-image $VYATTA_AUTOINSTALL_ARGS
+ExecStopPost=-/bin/systemctl --fail --no-block reboot
+StandardInput=null
+StandardOutput=journal+console
+StandardError=journal+console
+# resetting a serial console fails with "unappropriate ioctl for device"
+#TTYReset=yes
+TTYVHangup=yes

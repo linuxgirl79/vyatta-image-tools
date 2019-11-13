@@ -1,0 +1,145 @@
+module vyatta-op-copy-file-v1 {
+	namespace "urn:vyatta.com:mgmt:vyatta-op-copy-file:1";
+	prefix vyatta-op-copy-file-v1;
+
+	import vyatta-opd-extensions-v1 {
+		prefix opd;
+	}
+	import vyatta-op-copy-v1 {
+		prefix copy;
+	}
+
+	organization "AT&T Inc.";
+	contact
+		"AT&T
+		 Postal: 208 S. Akard Street
+				 Dallas, TX 25202
+		 Web: www.att.com";
+
+	description
+		"Copyright (c) 2019, AT&T Intellectual Property.
+		 All rights reserved.
+
+		Redistribution and use in source and binary forms, with or without
+		modification, are permitted provided that the following conditions
+		are met:
+
+		  1. Redistributions of source code must retain the above copyright
+		     notice, this list of conditions and the following disclaimer.
+		  2. Redistributions in binary form must reproduce the above
+		     copyright notice, this list of conditions and the following
+		     disclaimer in the documentation and/or other materials provided
+		     with the distribution.
+		  3. Neither the name of the copyright holder nor the names of its
+		     contributors may be used to endorse or promote products derived
+		     from this software without specific prior written permission.
+
+		THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+		'AS IS' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+		LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+		FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+		COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+		INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+		BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+		LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+		CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+		LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
+		ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+		POSSIBILITY OF SUCH DAMAGE.
+
+		SPDX-License-Identifier: BSD-3-Clause
+
+		Defines the top level 'file' level under 'copy' for operational CLI";
+
+	revision 2019-02-15 {
+		description "Initial version";
+	}
+
+	opd:augment /copy:copy {
+		opd:command file {
+			opd:help "Copy files";
+
+			opd:argument source {
+				opd:help "Copy files from specified source";
+				opd:allowed 'echo -n "<imagefiles>"';
+				type string;
+
+				opd:command to {
+					opd:help "Path to copy into";
+
+					opd:argument destination {
+						opd:help "Copy files to specified destination";
+						opd:on-enter 'vyatta-image-tools.pl --copy "$3" "$5"';
+						opd:privileged true;
+						type string;
+
+						opd:command source-interface {
+							opd:help "Source interface used for copying";
+
+							opd:argument interface {
+								opd:help "Copy files using this interface";
+								opd:allowed 'vyatta-interfaces.pl --show all';
+								opd:on-enter 'export VY_COPY_SOURCEINTF="$7" && \
+									vyatta-image-tools.pl --copy "$3" "$5"';
+								opd:privileged true;
+								type string;
+							}
+						}
+						opd:command user {
+							opd:help "Username for remote file transfer";
+							
+							opd:argument user {
+								opd:help "Username for remote file transfer";
+								opd:on-enter 'export VY_COPY_USER="$7" && \
+									vyatta-image-tools.pl --copy "$3" "$5"';
+								opd:privileged true;
+								type string;
+
+								opd:command password {
+									opd:help "Password for remote file transfer";
+									
+									opd:argument password {
+										opd:help "Password for remote file transfer";
+										opd:on-enter 'export VY_COPY_USER="$7" && \
+											export VY_COPY_PASS="$9" && vyatta-image-tools.pl \
+											--copy "$3" "$5"';
+										opd:privileged true;
+										opd:secret true;
+										type string;
+
+										opd:command source-interface {
+											opd:help "Source interface used for copying";
+
+											opd:argument interface {
+												opd:help "Copy files using this interface";
+												opd:allowed 'vyatta-interfaces.pl --show all';
+												opd:on-enter 'export VY_COPY_SOURCEINTF="${11}" && \
+													export VY_COPY_USER="$7" && export VY_COPY_PASS="$9" && \
+													vyatta-image-tools.pl --copy "$3" "$5"';
+												opd:privileged true;
+												type string;
+											}
+										}
+									}
+								}
+								opd:command source-interface {
+									opd:help "Source interface used for copying";
+									
+									opd:argument interface {
+										opd:help "Copy files using this interface";
+										opd:allowed 'vyatta-interfaces.pl --show all';
+										opd:on-enter 'export VY_COPY_SOURCEINTF="$9" && \
+											export VY_COPY_USER="$7" && vyatta-image-tools.pl \
+											--copy "$3" "$5"';
+										opd:privileged true;
+										type string;
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}

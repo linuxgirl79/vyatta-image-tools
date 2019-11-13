@@ -1,0 +1,48 @@
+#!/bin/bash
+#
+# Vyatta example postinstall hook
+#
+
+set -e
+
+: ${vyatta_prefix:=/opt/vyatta}
+: ${vyatta_exec_prefix:=$vyatta_prefix}
+: ${vyatta_sbindir:=${vyatta_exec_prefix}/sbin}
+
+source ${vyatta_sbindir}/vyatta-install-image.functions
+
+function example_configure ()
+{
+    # open output to real tty
+    exec 3>/dev/tty
+
+    #echo "You can output to the user through fd 3." >&3
+
+    exec 3>&-
+
+    echo "VII_POSTINSTALL_VYATTA_EXAMPLE=${VII_POSTINSTALL_VYATTA_EXAMPLE:-false}"
+    echo "VII_POSTINSTALL_VYATTA_EXAMPLE_FOO=bar"
+}
+
+function example_run ()
+{
+    local root_dir=${1?Missing argument}
+    local image_name=${2?Missing argument}
+    local foo=${VII_POSTINSTALL_VYATTA_EXAMPLE_FOO?Missing foo environment}
+
+    becho "The new foo is ${foo}"
+}
+
+case "$1" in
+    configure)
+	example_configure
+	;;
+    run)
+	[ "${VII_POSTINSTALL_VYATTA_EXAMPLE}" = "true" ] && example_run $2 $3
+	;;
+    *)
+	fail_exit "$0: unknown command: \"$1\""
+	;;
+esac
+
+exit 0

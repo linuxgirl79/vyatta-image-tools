@@ -1,0 +1,104 @@
+module vyatta-op-show-log-image-v1 {
+	namespace "urn:vyatta.com:mgmt:vyatta-op-show-log-image:1";
+	prefix vyatta-op-show-log-image-v1;
+
+	import vyatta-opd-extensions-v1 {
+		prefix opd;
+	}
+	import vyatta-op-show-v1 {
+		prefix show;
+	}
+	import vyatta-op-show-log-v1 {
+		prefix log;
+	}
+
+	organization "AT&T Inc.";
+	contact
+		"AT&T
+		 Postal: 208 S. Akard Street
+				 Dallas, TX 25202
+		 Web: www.att.com";
+
+	description
+		"Copyright (c) 2019, AT&T Intellectual Property.
+		 All rights reserved.
+
+		Redistribution and use in source and binary forms, with or without
+		modification, are permitted provided that the following conditions
+		are met:
+
+		  1. Redistributions of source code must retain the above copyright
+		     notice, this list of conditions and the following disclaimer.
+		  2. Redistributions in binary form must reproduce the above
+		     copyright notice, this list of conditions and the following
+		     disclaimer in the documentation and/or other materials provided
+		     with the distribution.
+		  3. Neither the name of the copyright holder nor the names of its
+		     contributors may be used to endorse or promote products derived
+		     from this software without specific prior written permission.
+
+		THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+		'AS IS' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+		LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+		FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+		COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+		INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+		BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+		LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+		CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+		LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
+		ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+		POSSIBILITY OF SUCH DAMAGE.
+
+		SPDX-License-Identifier: BSD-3-Clause
+
+		Defines the top level 'image' level under 'show log' for operational CLI";
+
+	revision 2019-02-15 {
+		description "Initial version";
+	}
+
+	opd:augment /show:show/log:log {
+		opd:command image {
+			opd:help "Show logs from an image";
+			opd:on-enter "";
+		
+			opd:argument image-name {
+				opd:help "Show system log for image";
+				opd:allowed 'vyatta-image-op --action=list-images';
+				opd:on-enter 'vyatta-image-op --action=show-log "$4"';
+				type string;
+
+				opd:command all {
+					opd:help "Show system log for image";
+					opd:on-enter 'vyatta-image-op --action=show-log "$4"';
+					status obsolete;
+				}
+				opd:command directory {
+					opd:help "Show listing of user-defined log files for image";
+					opd:on-enter 'vyatta-image-op --action=show-log-directory "$4"';
+				}
+				opd:command file {
+					opd:help "Show contents of user-defined log file for image";
+
+					opd:argument file-name {
+						opd:help "Show contents of specified user-defined log file for image";
+						opd:allowed 'vyatta-image-op --action=list-log-files "$4"';
+						opd:on-enter 'vyatta-image-op --action=show-log-file "$4" "$6"';
+						type string;
+					}
+				}
+				opd:command tail {
+					opd:help "Show last lines of the system log";
+					opd:on-enter 'vyatta-image-op --action=show-log-tail "$4"';
+
+					opd:argument rows {
+						opd:help "Show last changes to system log";
+						opd:on-enter 'vyatta-image-op --action=show-log-tail "$4" "$6"';
+						type uint64;
+					}
+				}
+			}
+		}
+	}
+}

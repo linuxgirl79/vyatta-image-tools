@@ -1,0 +1,45 @@
+#!/bin/bash
+
+set -e
+
+source ${vyatta_sbindir}/vyatta-install-image.functions
+
+# We cannot use grub-install from the installer as it does not support
+# reading the new binaries froma new path, so it will just re-use the already
+# installed ones.
+
+function update_efi_binaries ()
+{
+    local INSTALL_ROOT_DIR=${1?Missing argument}
+
+    if [ -d /sys/firmware/efi -a \
+            -d  /boot/efi/EFI/debian -a \
+            -d ${INSTALL_ROOT_DIR}/usr/lib/shim -a \
+            -d ${INSTALL_ROOT_DIR}/usr/lib/grub ] ; then
+        lecho "Updating signed shim EFI binaries..."
+        cd  ${INSTALL_ROOT_DIR}/usr/lib/shim
+        for BIN in *.signed; do
+           run_command cp -a $BIN /boot/efi/EFI/debian/${BIN%.signed}
+        done
+
+        lecho "Updating signed grub EFI binaries..."
+        while read SIG; do
+           run_command cp -a ${INSTALL_ROOT_DIR}/usr/lib/grub/$SIG /boot/efi/EFI/debian/
+        done < <(find ${INSTALL_ROOT_DIR}/usr/lib/grub -name '*.signed' -printf '%P\n')
+
+        cd /boot/efi/EFI/debian
+        for BIN in *.signed; do
+           run_command mv $BIN ${BIN%.signed}
+        done
+    fi
+}
+
+case "$1" in
+    configure)
+	;;
+    run)
+	update_efi_binaries $2
+	;;
+esac
+
+exit 0

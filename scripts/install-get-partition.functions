@@ -1,0 +1,138 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Copyright (c) 2019, AT&T Intellectual Property.
+# All Rights Reserved.
+
+# reread partition table and wait for udev to settle afterwards
+wait_for_partprobe ()
+{
+    local disk=${1:?missing argument}
+
+    udevadm settle &>/dev/null
+    partprobe -s ${disk} &>/dev/null
+    udevadm settle &>/dev/null
+}
+
+# make the root partition, sets the global ROOT_PARTITION
+create_root_partition () {
+    local ldrive=$1
+    local start_offset=$2
+    local root_part_size=$3
+    local ltype=$4
+    wait_for_partprobe /dev/$ldrive
+    old_parts=$(lsblk --noheadings --output KNAME --sort KNAME /dev/$ldrive)
+    run_command parted -s -a optimal /dev/$ldrive mkpart $ltype ${start_offset} ${root_part_size}MB
+    wait_for_partprobe /dev/$ldrive
+    new_parts=$(lsblk --noheadings --output KNAME --sort KNAME /dev/$ldrive)
+    echo $(comm -3 <(echo "$old_parts") <(echo "$new_parts"))
+}
+
+# set GPT BIOS-boot flag
+set_bios_grub_flag () {
+      local ldrive=$1
+      local lpart=${2//[a-z]/}
+      run_command parted -s -a optimal /dev/$ldrive set $lpart bios_grub on
+      if [ $? -ne 0 ]; then
+          becho "Error setting boot flag on $ldrive."
+          becho "Please see $INSTALL_LOG for more details. Exiting..."
+         exit 1
+      fi
+}
+
+create_grub_partition () {
+    local ldrive=$1
+    local grub_start=$2
+    local grub_end=$3
+    becho \
+	  "Creating grub partition on /dev/$ldrive $grub_start $grub_end"
+    run_command parted -s -a optimal /dev/$ldrive mkpart grub \
+			${grub_start}kiB ${grub_end}kiB
+    if [ $? -ne 0 ]; then
+	becho "Error creating partition."
+	becho "Please see $INSTALL_LOG for more details. Exiting..."
+	exit 1
+    fi
+    set_bios_grub_flag $ldrive 1
+}
+
+create_esp_partition () {
+    local ldrive=$1
+    local offset=${2:-1024}
+
+    # calculate new start_offset
+    local end=$(($offset + 2880))
+    becho "Creating ESP partition on /dev/$ldrive $offset $end"
+    # make the grub partition
+    run_command parted -s -a optimal /dev/$ldrive mkpart ESP fat16 \
+        ${offset}kiB ${end}kiB || \
+	fail_exit "Error creating ESP partition."
+    run_command parted -s /dev/$ldrive set 1 boot on
+}
+
+#
+# Returns all partition sizes
+#
+get_part_sizes () {
+  local part_arr=( "$@" )
+  local return_arr=''
+  local num_of_partitions=$(_num_of $part_arr)
+
+  # Check for malformed input args
+  if [ $(expr ${#part_arr[@]} % 3) != 0 ]; then
+    becho "Error: Malformed part_size arguments. This should not happen."
+    exit 1
+  fi
+
+  for i in `seq 0 $(expr ${#part_arr[@]} - 1)`; do
+    if [ $(expr $i % 3) == 1 ]; then
+      continue
+    fi
+    unset part_arr[$i]
+  done
+
+  # Return
+  echo ${part_arr[@]}
+}
+
+# make a filesystem on the drive
+# $1 is the drive to format
+make_filesystem () {
+  local ldrive=$1
+  local fs=$2
+  local force=""
+
+  # with mkfs.vfat -F means FAT-size, not force
+  if [ "$fs" != "vfat" ]; then
+    force="-F"
+  fi
+
+  becho -n "Creating filesystem on /dev/${ldrive}..."
+
+  output=$(mkfs $force -t $fs /dev/$ldrive 2>&1)
+  status=$?
+  if [ "$status" != 0 ]; then
+    echo -e "Error: couldn't create the root filesystem.\nSee $INSTALL_LOG for further details.\nExiting..."
+    lecho "Error: couldn't create the root filesystem.\n/sbin/mke2fs -j /dev/$ldrive\n$output"
+    exit 1
+  fi
+  becho "OK"
+}
+
+#
+# Set a Filesystem label
+#
+set_label () {
+  local ldrive=$1
+  local label=$2
+  local fs=$3
+
+  if [ "$fs" = "vfat" ]; then
+    run_command fatlabel /dev/$ldrive $label
+  else
+    run_command e2label /dev/$ldrive $label
+  fi
+}
+
+# Local Variables:
+# mode: shell-script
+# sh-indentation: 4
+# End:

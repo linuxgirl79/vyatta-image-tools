@@ -1,0 +1,238 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-only
+
+# Copyright (c) 2019, AT&T Intellectual Property.
+# All Rights Reserved.
+
+# Copyright (c) 2014-2017 by Brocade Communications Systems, Inc.
+# All rights reserved.
+
+#
+# VII_PART_LIST is the global input for create_partitions. It get  sourced from
+# base-files, which adjusts it according to version (vCPE, master). The partition_editor
+# adjusts this list using the helper functions below.
+#
+
+#
+# Given a VII_PART_LIST, return only the names
+#
+_to_name () {
+  local part_arr=( "$@" )
+  local index=0
+  for i in `seq 0 ${#part_arr[@]}`; do
+    if [ $(expr $i % 3) == 0 ]; then
+      continue
+    fi
+    unset part_arr[$i]
+  done
+  echo ${part_arr[@]}
+}
+
+#
+# Given a VII_PART_LIST, return only the sizes
+#
+_to_size () {
+  local part_arr=( "$@" )
+  part_arr=( "${part_arr[@]:1}" )
+  local index=0
+
+  for i in `seq 0 ${#part_arr[@]}`; do
+    if [ $(expr $i % 3) == 0 ]; then
+      continue
+    fi
+    unset part_arr[$i]
+  done
+  echo ${part_arr[@]}
+}
+
+#
+# Given a VII_PART_LIST, return only the mount points
+#
+_to_mount () {
+  local part_arr=( "$@" )
+  part_arr=( "${part_arr[@]:2}" )
+  local index=0
+
+  for i in `seq 0 ${#part_arr[@]}`; do
+    if [ $(expr $i % 3) == 0 ]; then
+      continue
+    fi
+    unset part_arr[$i]
+  done
+  echo ${part_arr[@]}
+}
+
+#
+# Number of Partitions in VII_PART_LIST
+#
+_num_of () {
+  part_arr=( "$@" )
+  echo $(expr ${#part_arr[@]} / 3)
+}
+
+
+#
+# Delete last partition.
+# _rm_part [part list]
+#
+_rm_part () {
+  local opt_arr=( "$@" )
+  local size=$(expr ${#opt_arr[@]} - 1)
+
+  # Already empty
+  if [ $size -lt 2 ]; then
+    return
+  fi
+
+  for i in `seq $size -1 $(expr $size - 2)`; do
+    unset opt_arr[$i]
+  done
+  echo ${opt_arr[@]}
+}
+
+#
+# Add partition. _add_part [part list] [name] [size] [mount point]
+#
+_add_part () {
+  local opt_arr=( "$@" )
+  echo ${opt_arr[@]}
+}
+
+#
+# Default print function for VII_PART_LIST
+#
+print_partition_estimates () {
+  local part_arr=( "$@" )
+  local part_num=0
+
+  # Space
+  echo -e "\n"
+
+  for i in `seq 0 3 ${#part_arr[@]}`; do
+    part_num=$(expr $part_num + 1)
+    echo "Partition $part_num: ${part_arr[$i]} ${part_arr[$(expr $i + 1)]}MB on ${part_arr[$(expr $i + 2)]}"
+  done
+
+  # Space
+  echo -e "\n"
+}
+
+#
+# Adjust all partition sizes to be of size $1
+#
+_adjust_sizes () {
+  local opt_arr=( "$@" )
+  local part_size=${opt_arr[0]}
+  local part_arr=( "${opt_arr[@]:1}" )
+
+  for i in `seq 1 3 ${#part_arr[@]}`; do
+    part_arr[$i]=$part_size
+  done
+  echo ${part_arr[@]}
+}
+
+
+_to_mount_fn () {
+  local mntp=$1
+  echo "$(echo $mntp | tr / -a | cut -c 2-).mount"
+}
+
+#
+# Enable systemd mount file
+#
+enable_systemd_mount () {
+  local file=$1
+  local root=$2
+  local dest="$root/etc/systemd/system/local-fs.target.wants/"
+  local path=''
+
+  mkdir -p $dest
+  cp --remove-destination "$file" "$dest"
+}
+
+gather_raid_devices () {
+    local raid_type=${1:?Missing raid type}
+
+    # Save stdout to FD3 so that we can safely echo to console
+    exec 3<&1
+    exec >/dev/tty
+
+    declare -a raid_array
+    declare response
+    echo "What drives would you like to add to the raid array? " \
+        "We found the following suitable ones:"
+    while [[ ${#raid_array[@]} -lt 2 || $response == Y* ]]; do
+        select_drive "Add drive to RAID array?" 'RAID_DRIVE'
+        raid_array=( ${raid_array[@]} "$RAID_DRIVE" )
+        echo -n "Current array includes drives: "
+        echo ${raid_array[@]}
+
+        case $raid_type in
+            [01])
+                if [[ ${#raid_array[@]} -lt 2 ]]; then
+                    echo "We need at least two disks, please add another one."
+                    reponse="Yes"
+                    continue
+                fi
+                ;;
+            5)
+                if [[ ${#raid_array[@]} -lt 3 ]]; then
+                    echo "We need at least three disks, please add another one."
+                    response="Yes"
+                    continue
+                fi
+                ;;
+            *)
+                fail_exit "Fatal error"
+        esac
+        if [[ ${#raid_array[@]} -ge 2 && "$(get_free_devices)" ]]; then
+            echo -n "Would you like to add another drive? (Yes/No) [No]: "
+            response=$(get_response "No" "Yes No Y N")
+        fi
+    done
+
+    exec 1<&3
+    echo ${raid_array[@]}
+}
+
+size_of_raid () {
+    local raid=${1:?Missing raid device}
+    local size=0
+    while read START END SIZE EXTRA; do
+        local tmp=${SIZE//MB}
+        tmp=$(echo $tmp | cut -d'.' -f1) # trim decimal
+        size=$(( $size + $tmp ))
+    done < <(parted /dev/md/md-$raid unit MB p free | grep 'Free Space'| sed 's/ +/ /g')
+    echo $size
+}
+
+size_of_array () {
+    local devices=( "${@:?Missing raid members}" )
+    local size=0
+    for drive in ${devices[@]}; do
+        drive=$(basename $drive)
+        size=$(( $size + $(get_drive_size $drive) ))
+    done
+    echo $size
+}
+
+# Stupid helper function to convert raid parent
+# drive to the actual raid partition.
+_convert_raid_index () {
+    local raid_index=${1:?Missing input}
+    local drives=${2:?Missing input}
+
+    for d in $drives; do
+        case $d in
+            [sv]d[a-z])
+                echo -ne "${d}${raid_index} "
+                ;;
+        esac
+    done
+}
+
+destroy_md_devices () {
+    for dev in $(ls /dev/md/* 2>/dev/null); do
+        run_command mdadm --stop "$dev" 2>&1
+    done
+}

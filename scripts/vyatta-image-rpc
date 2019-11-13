@@ -1,0 +1,100 @@
+#!/usr/bin/perl
+# SPDX-License-Identifier: GPL-2.0-only
+
+# Copyright (c) 2019, AT&T Intellectual Property.
+# All Rights Reserved.
+
+use warnings;
+use strict;
+
+use Getopt::Long;
+use File::Basename;
+use JSON;
+
+use lib "/opt/vyatta/share/perl5";
+use Vyatta::Live;
+
+sub add_image {
+    my $in       = do { local $/; <> };
+    my $input    = decode_json($in);
+    my $location = $input->{'location'};
+    my $username = defined( $input->{'username'} ) ? $input->{'username'} : "";
+    my $password = defined( $input->{'password'} ) ? $input->{'password'} : "";
+
+    my $output =
+qx(/opt/vyatta/sbin/vyatta-install-image -y $location $username $password 2>/dev/null);
+
+    die $output if $? != 0;
+
+    print encode_json( {} );
+}
+
+sub delete_image_rpc {
+    my $in    = do { local $/; <> };
+    my $input = decode_json($in);
+    my $name  = $input->{'name'};
+
+    delete_image($name);
+
+    print encode_json( {} );
+}
+
+sub set_default_boot_image_rpc {
+    my $in    = do { local $/; <> };
+    my $input = decode_json($in);
+    my $name  = $input->{'name'};
+
+    set_default_boot_image($name);
+
+    print encode_json( {} );
+}
+
+sub get_state {
+    my $get_image_state = sub {
+        my ($image) = @_;
+        my $output = {
+            'name'    => $image,
+            'version' => get_image_version($image),
+            'storage' => get_image_storage($image),
+        };
+        return $output;
+    };
+
+    my @images = map { $get_image_state->($_) } list_images();
+
+    my $output = {
+        'installed-images'   => \@images,
+        'running-image'      => get_running_image(),
+        'default-boot-image' => get_default_boot_image(),
+    };
+
+    print encode_json($output);
+}
+
+sub call_action_by_name {
+    my ( $actions, $script_name, $opt_name, $usage ) = @_;
+
+    my $usagefn = sub {
+        printf( "Usage for %s %s:\n", $script_name, $usage );
+        printf( "    %s %s --%s=[%s]\n",
+            $script_name, $usage, $opt_name, join( "|", keys( %{$actions} ) ) );
+        exit(1);
+    };
+
+    my ($name);
+    GetOptions( "$opt_name=s" => \$name, ) or $usagefn->();
+    $usagefn->() unless ( defined($name) );
+
+    my $action = $actions->{$name};
+    $usagefn->() unless ( defined($action) );
+
+    return $action->();
+}
+
+my %actions = (
+    "add-image"              => \&add_image,
+    "delete-image"           => \&delete_image_rpc,
+    "set-default-boot-image" => \&set_default_boot_image_rpc,
+    "get-state"              => \&get_state,
+);
+call_action_by_name( \%actions, basename($0), "action", "" );

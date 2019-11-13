@@ -1,0 +1,100 @@
+#!/usr/bin/perl
+# SPDX-License-Identifier: GPL-2.0-only
+
+# Copyright (c) 2019, AT&T Intellectual Property.
+# All Rights Reserved.
+
+# Copyright (c) 2015-2017 by Brocade Communications Systems, Inc.
+# All rights reserved.
+
+use strict;
+use warnings;
+use lib "/opt/vyatta/share/perl5/";
+use XorpConfigParser;
+
+my $root        = "";
+my $config_boot = "/config/config.boot";
+my $grub_cfg    = "/boot/grub/grub.cfg";
+
+my @services;
+my $grub_options;
+
+sub configure_services {
+    my $config_boot = shift;
+    exit 1 if ( !defined($config_boot) );
+
+    my $xcp = new XorpConfigParser();
+    $xcp->parse("$root/$config_boot");
+
+    foreach my $service (@services) {
+        my $service_node = $xcp->get_node( [ 'service', $service ] );
+        if ( not defined $service_node ) {
+            $xcp->create_node( [ 'service', $service ] );
+        }
+    }
+
+    my $tmpfile = "/tmp/vyatta_postinstall_configure.$$";
+    open( my $tmpfh, '>', $tmpfile ) or exit 1;
+    select $tmpfh;
+    $xcp->output(0);
+    close $tmpfh;
+
+    my $ret = system("mv $tmpfile $root/$config_boot");
+    die "Unable to update $root/$config_boot\n" if ( $ret >> 8 );
+}
+
+sub configure_cmdline {
+    my $grub_cfg     = shift;
+    my $grub_options = shift;
+    exit 1 if ( !defined($grub_cfg) or !defined($grub_options) );
+
+    my $tmpfile = "/tmp/vyatta_postinstall_configure.$$";
+
+    open( my $tmpfh, '>', $tmpfile )
+      or die "Can't open: $tmpfile\n";
+    open( my $grubfh, '<', "$root/$grub_cfg" )
+      or die "Can't open: $root/$grub_cfg";
+
+    while ( $_ = <$grubfh> ) {
+        if (/ vyatta-union=/) {
+            chomp();
+            $_ = $_ . " " . $grub_options . "\n";
+        }
+        print {$tmpfh} $_;
+    }
+    close($grubfh);
+    close($tmpfh);
+
+    my $ret = system("mv $tmpfile $root/$grub_cfg");
+    die "Unable to overwrite $root/$grub_cfg\n" if ( $ret >> 8 );
+
+    chmod( 0644, "$root/$grub_cfg" );
+}
+
+while ( $#ARGV >= 0 ) {
+    $_ = shift @ARGV;
+    if (/^--services=/) {
+        ( undef, $_ ) = split( '=', $_ );
+        @services = split( ',', $_ );
+        next;
+    }
+    elsif (/^--grub-options=/) {
+        ( undef, $grub_options ) = split( '=', $_, 2 );
+        next;
+    }
+    elsif (/^--root=/) {
+        ( undef, $_ ) = split( '=', $_ );
+        ($root) = split( ',', $_ );
+        next;
+    }
+    else {
+        print
+"Usage: vyatta-postinstall-configure [--services=LIST][--grub-options=STRING][--rootdir=DIR]\n";
+        exit 1;
+    }
+}
+
+configure_services($config_boot) if @services;
+configure_cmdline( $grub_cfg, $grub_options ) if $grub_options;
+
+exit 0;

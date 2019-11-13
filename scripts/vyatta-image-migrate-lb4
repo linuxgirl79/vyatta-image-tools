@@ -1,0 +1,54 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-only
+
+# Copyright (c) 2019, AT&T Intellectual Property.
+# All Rights Reserved.
+#
+# Copyright (c) 2015-2017, Brocade Communications Systems, Inc.
+# All rights reserved.
+#
+
+: "${vyatta_env:=/etc/default/vyatta}"
+source "$vyatta_env"
+
+migrate_liveboot4_install ()
+{
+    local DIR="$1"
+
+    # The installer on liveboot4 releases installs the "saved"
+    # configurations to persistence/ instead of persistence/rw/
+    if [ -d "${DIR}/persistence/rw" ]; then
+        if [ -d "${DIR}/persistence/config" ]; then
+            sg vyattacfg -c "umask 077; cp -rf ${DIR}/persistence/config /"
+
+	    echo "Renaming original /config to ${DIR}/persistence/config.35"
+            mv -f "${DIR}/persistence/config" "${DIR}/persistence/config.35"
+            chmod 700 "${DIR}/persistence/config.35"
+        fi
+
+        if [ -d "${DIR}/persistence/etc" ]; then
+            for file in etc/vyatta/controller.conf etc/vyatta/dataplane.conf \
+                                                    etc/network/interfaces
+            do
+                cp -fp "${DIR}/persistence/$file" "/$file"
+            done
+
+            if [ -d "${DIR}/persistence/etc/ssh" ]; then
+                cp -fp "${DIR}"/persistence/etc/ssh/* /etc/ssh
+            fi
+
+	    echo "Renaming original /etc to ${DIR}/persistence/etc.35"
+            mv -f "${DIR}/persistence/etc" "${DIR}/persistence/etc.35"
+            chmod 700 "${DIR}/persistence/etc.35"
+        fi
+    fi
+}
+
+ROOTFS_DIR=$("${vyatta_sbindir}/vyatta-live-image" get_live_rootfs_path)
+IMAGE_NAME=$("${vyatta_sbindir}/vyatta-live-image" get_image_version)
+IMAGE_DIR="${ROOTFS_DIR}/boot/${IMAGE_NAME}"
+
+if [ -f "${IMAGE_DIR}/persistence/config/.vyatta_config" ] ; then
+    echo "Migrating saved configuration directory from live-boot 4.x"
+    migrate_liveboot4_install "${IMAGE_DIR}"
+fi

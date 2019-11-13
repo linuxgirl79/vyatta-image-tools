@@ -1,0 +1,366 @@
+#!/usr/bin/perl
+# SPDX-License-Identifier: GPL-2.0-only
+
+
+# **** License ****
+#
+# Copyright (c) 2019, AT&T Intellectual Property.
+# All Rights Reserved.
+#
+# Copyright (c) 2017 by Brocade Communications Systems, Inc.
+# All rights reserved.
+#
+# **** End License ****
+
+use strict;
+use warnings;
+use Getopt::Long;
+use File::Basename;
+use Number::Bytes::Human qw(format_bytes);
+
+use lib "/opt/vyatta/share/perl5/";
+use Vyatta::Configd;
+
+sub show_storage {
+    my $client = Vyatta::Configd::Client->new();
+    my $tree   = $client->tree_get_full_hash("system-image");
+
+    printf(
+"Image name                        Read-Only   Read-Write        Total\n"
+    );
+    printf(
+"------------------------------ ------------ ------------ ------------\n"
+    );
+
+    foreach my $image ( @{ $tree->{'system-image'}->{'installed-images'} } ) {
+        printf(
+            "%-30s %12s %12s %12s\n",
+            $image->{'name'},
+            format_bytes( $image->{'storage'}->{'read-only'} ),
+            format_bytes( $image->{'storage'}->{'read-write'} ),
+            format_bytes( $image->{'storage'}->{'total'} )
+        );
+    }
+}
+
+sub print_images {
+    my ( $tree, $show_version, $msg ) = @_;
+    my $images       = $tree->{'system-image'}->{'installed-images'};
+    my $default_boot = $tree->{'system-image'}->{'default-boot-image'};
+    my $running      = $tree->{'system-image'}->{'running-image'};
+
+    die("No images are currently installed on the system\n")
+      if scalar( @{$images} ) == 0;
+
+    $msg = sprintf( "The system currently has the following image%s installed:",
+        scalar( @{$images} ) == 1 ? "" : "s" )
+      if !defined($msg);
+
+    printf( "%s\n\n", $msg );
+
+    my $index = 0;
+    foreach my $image ( @{$images} ) {
+        printf(
+            "  %2d: %s%s%s%s\n",
+            $index + 1,
+            $image->{'name'},
+            $show_version ? " [" . $image->{'version'} . "]" : "",
+            $image->{'name'} eq $default_boot ? " (default boot)"  : "",
+            $image->{'name'} eq $running      ? " (running image)" : "",
+        );
+        $index = $index + 1;
+    }
+    print "\n";
+}
+
+sub show_images {
+    my $client = Vyatta::Configd::Client->new();
+    my $tree   = $client->tree_get_full_hash("system-image");
+    print_images( $tree, 0 );
+}
+
+sub show_versions {
+    my $client = Vyatta::Configd::Client->new();
+    my $tree   = $client->tree_get_full_hash("system-image");
+    print_images( $tree, 1 );
+}
+
+sub list_images_cmd {
+    my $client = Vyatta::Configd::Client->new();
+    my $tree   = $client->tree_get_full_hash("system-image");
+    my $images = $tree->{'system-image'}->{'installed-images'};
+    foreach my $image ( @{$images} ) {
+        printf( "%s\n", $image->{'name'} );
+    }
+}
+
+sub prompt_user_for_image {
+    my ( $prompt_msg, $error_msg, $num_entries ) = @_;
+    print "$prompt_msg";
+    my $resp = <STDIN>;
+    if ( defined($resp) ) {
+        chomp($resp);
+        if (  !( $resp =~ /^\d+$/ )
+            || ( $resp < 1 )
+            || ( $resp > $num_entries ) )
+        {
+            $resp = undef;
+        }
+    }
+    if ( !defined($resp) ) {
+        die "$error_msg Exiting...\n";
+    }
+    print "\n";
+    return $resp - 1;
+}
+
+sub check_image_exists {
+    my ( $tree, $image_name ) = @_;
+    my ($image) = grep { $_->{'name'} eq $image_name }
+      @{ $tree->{'system-image'}->{'installed-images'} };
+    die "Image \"$image_name\" not found\n" if !defined($image);
+}
+
+sub delete_image_name {
+    my ( $client, $tree, $image_name ) = @_;
+
+    my $running_image = $tree->{'system-image'}->{'running-image'};
+
+    check_image_exists( $tree, $image_name );
+
+    if ( $image_name eq $running_image ) {
+        print "Cannot delete current running image. Reboot into a different\n";
+        print "image to delete this image.  Exiting...\n";
+        exit 1;
+    }
+    print "Are you sure you want to delete the\n\"$image_name\" image? ";
+    print '(Yes/No) [No]: ';
+    my $resp = <STDIN>;
+    if ( !defined($resp) ) {
+        $resp = 'no';
+    }
+    chomp($resp);
+    $resp = lc($resp);
+    if ( ( $resp ne 'yes' ) && ( $resp ne 'y' ) ) {
+        die "Image is NOT deleted. Exiting...\n";
+    }
+
+    print "Deleting the \"$image_name\" image...\n";
+
+    $client->call_rpc_hash( "vyatta-image-v1", "delete-image",
+        { 'name' => $image_name } );
+
+    print "Done\n";
+}
+
+sub get_image_name {
+    my ( $tree, $resp ) = @_;
+    my $image = ${ $tree->{'system-image'}->{'installed-images'} }[$resp];
+    return $image->{'name'};
+}
+
+sub delete_image_cmd {
+    my ($image_name) = $ARGV[0];
+    my $client       = Vyatta::Configd::Client->new();
+    my $tree         = $client->tree_get_full_hash("system-image");
+
+    delete_image_name( $client, $tree, $image_name );
+}
+
+sub delete_image_prompt {
+    my $client     = Vyatta::Configd::Client->new();
+    my $tree       = $client->tree_get_full_hash("system-image");
+    my $prompt_msg = 'Select the image to delete: ';
+    my $error_msg  = 'Invalid selection. Nothing is deleted.';
+
+    print_images( $tree, 0, "The following image(s) can be deleted:" );
+    my $resp = prompt_user_for_image( $prompt_msg, $error_msg,
+        scalar( $tree->{'system-image'}->{'installed-images'} ) );
+
+    my $image_name = get_image_name( $tree, $resp );
+    delete_image_name( $client, $tree, $image_name );
+}
+
+sub select_image_name {
+    my ( $client, $tree, $image_name ) = @_;
+    my $default_image = $tree->{'system-image'}->{'default-boot-image'};
+
+    check_image_exists( $tree, $image_name );
+
+    if ( $image_name eq $default_image ) {
+        die "The default boot image has not been changed.\n";
+    }
+
+    $client->call_rpc_hash( "vyatta-image-v1", "set-default-boot-image",
+        { 'name' => $image_name } );
+
+    print <<EOF;
+Default boot image has been set to "$image_name".
+You need to reboot the system to start the new default image.
+
+EOF
+
+}
+
+sub select_image_cmd {
+    my ($image_name) = $ARGV[0];
+    my $client       = Vyatta::Configd::Client->new();
+    my $tree         = $client->tree_get_full_hash("system-image");
+    select_image_name( $client, $tree, $image_name );
+}
+
+sub select_image_prompt {
+    my $client     = Vyatta::Configd::Client->new();
+    my $tree       = $client->tree_get_full_hash("system-image");
+    my $prompt_msg = 'Select the default boot image: ';
+    my $error_msg  = 'Invalid selection. Default is not changed.';
+
+    print_images($tree);
+    my $resp = prompt_user_for_image( $prompt_msg, $error_msg,
+        scalar( $tree->{'system-image'}->{'installed-images'} ) );
+
+    my $image_name = get_image_name( $tree, $resp );
+    select_image_name( $client, $tree, $image_name );
+}
+
+sub list_md_cmd {
+    if ( opendir( my $dh, '/dev/md/' ) ) {
+        while ( readdir $dh ) {
+            if (m/^md-([a-zA-Z]+)$/) {
+                print "$1\n";
+            }
+        }
+        closedir $dh;
+    }
+    else {
+        print "No RAID devices found";
+    }
+}
+
+sub list_md_disks_cmd {
+    my ($md_name) = $ARGV[0];
+
+    my $md_dev = readlink "/dev/md/md-$md_name";
+    $md_dev = basename($md_dev);
+    open my $fh, '<', '/proc/mdstat' or die;
+    while ( my $line = <$fh> ) {
+        if ( $line =~ m/$md_dev/ ) {
+            my (@disks) = $line =~ m/([\S]+)\[[0-9]\]/g;
+            if (@disks) {
+                print join( "\n", @disks ), "\n";
+            }
+        }
+    }
+}
+
+sub show_log_cmd {
+    my ($image) = $ARGV[0];
+    my $output =
+      qx(/opt/vyatta/sbin/vyatta-live-image get_image_persistence_path $image);
+    die "$image: No such image" if $? != 0;
+
+    $output = qx(echo "$output" | xargs -I'{}' -r journalctl -a --no-pager --root='{}');
+    print "$output" if $? == 0;
+}
+
+sub show_log_dir_cmd {
+    my ($image) = $ARGV[0];
+    my $output =
+      qx(/opt/vyatta/sbin/vyatta-live-image get_image_persistence_path $image);
+    die "$image: No such image" if $? != 0;
+
+    $output =
+      qx(echo "$output" | xargs -I'{}' -r ls '{}'/var/log/$ENV{'LOGNAME'});
+    print "$output" if $? == 0;
+}
+
+sub show_log_file_cmd {
+    my ( $image, $file ) = @ARGV;
+    my $output =
+      qx(/opt/vyatta/sbin/vyatta-live-image get_image_persistence_path $image);
+    die "$image: No such image" if $? != 0;
+
+    $output =
+qx(echo "$output" | xargs -I'{}' -r vyatta-show-log-file "$file" '{}'/var/log/$ENV{'LOGNAME'});
+    print "$output" if $? == 0;
+}
+
+sub show_log_tail_cmd {
+    my ( $image, $len ) = @ARGV;
+    my $output =
+      qx(/opt/vyatta/sbin/vyatta-live-image get_image_persistence_path $image);
+    die "$image: No such image" if $? != 0;
+
+    $output =
+      qx(echo "$output" | xargs -I'{}' -r journalctl -a --no-pager -n "$len" --root='{}')
+      if defined $len;
+
+    $output =
+      qx(echo "$output" | xargs -I'{}' -r journalctl -a --no-pager -n --root='{}')
+      if !defined $len;
+
+    print "$output" if $? == 0;
+}
+
+sub list_log_files_cmd {
+    my ($image) = $ARGV[0];
+    my $output =
+      qx(/opt/vyatta/sbin/vyatta-live-image get_image_persistence_path $image);
+    die "$image: No such image" if $? != 0;
+
+    $output =
+      qx(echo "$output" | xargs -I'{}' -r ls '{}'/var/log/$ENV{'LOGNAME'});
+
+    print "$output" if $? == 0;
+}
+
+sub autoinstall_cmd {
+    my ( $image, $type ) = @ARGV;
+
+    if ( $type eq '.' ) {
+        system("vyatta-install-image -y '$image'");
+    }
+    elsif ( $type eq '..' ) {
+        system("vyatta-install-image -y '$image' && reboot");
+    }
+}
+
+sub call_action_by_name {
+    my ( $actions, $script_name, $opt_name, $usage ) = @_;
+
+    my $usagefn = sub {
+        printf( " Usage for %s % s:\n", $script_name, $usage );
+        printf( "    %s %s --%s=[%s]\n",
+            $script_name, $usage, $opt_name, join( "|", keys( %{$actions} ) ) );
+        exit(1);
+    };
+
+    my ($name);
+    GetOptions( "$opt_name=s" => \$name, ) or $usagefn->();
+    $usagefn->() unless ( defined($name) );
+
+    my $action = $actions->{$name};
+    $usagefn->() unless ( defined($action) );
+
+    return $action->();
+}
+
+my %actions = (
+    "show-storage"           => \&show_storage,
+    "show-versions"          => \&show_versions,
+    "show-images"            => \&show_images,
+    "list-images"            => \&list_images_cmd,
+    "delete-image-prompt"    => \&delete_image_prompt,
+    "delete-image"           => \&delete_image_cmd,
+    "select-image-prompt"    => \&select_image_prompt,
+    "select-image"           => \&select_image_cmd,
+    "list-md"                => \&list_md_cmd,
+    "list-md-disks"          => \&list_md_disks_cmd,
+    "list-log-files"         => \&list_log_files_cmd,
+    "show-log"               => \&show_log_cmd,
+    "show-log-directory"     => \&show_log_dir_cmd,
+    "show-log-file"          => \&show_log_file_cmd,
+    "show-log-tail"          => \&show_log_tail_cmd,
+    "vyatta-autoinstall"     => \&autoinstall_cmd,
+);
+call_action_by_name( \%actions, basename($0), "action", "" );

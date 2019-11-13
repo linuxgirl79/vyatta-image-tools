@@ -1,0 +1,3 @@
+yang/vyatta-system-boot-loader-v1.yang usr/share/configd/yang/
+tmplscripts/system/boot-loader/plaintext-password/configd_subst1.cli /opt/vyatta/share/tmplscripts/system/boot-loader/plaintext-password/
+tmplscripts/system/boot-loader/plaintext-password/configd_validate1.cli /opt/vyatta/share/tmplscripts/system/boot-loader/plaintext-password/

@@ -1,0 +1,40 @@
+#!/bin/sh
+
+set -e
+
+PREREQ=""
+
+prereqs()
+{
+    echo "$PREREQ"
+}
+
+case $1 in
+prereqs)
+    prereqs
+    exit 0
+    ;;
+esac
+
+#
+# If the vyatta-autoinstall parameter includes a local file it might got
+# injected via the initrd so lets copy it to the $rootmnt.
+#
+copy_autoinstall_file ()
+{
+    set -- $(cat /proc/cmdline)
+    for _PARAMETER in "$@"
+    do
+        case "${_PARAMETER}" in
+            vyatta-autoinstall=*)
+		FILENAME=$(echo "${_PARAMETER}" | \
+			sed -ne 's/^vyatta-autoinstall=\(file:\)\?//p')
+		if [[ -r ${FILENAME} ]] ; then
+		    cp -f ${FILENAME} ${rootmnt}
+		fi
+		;;
+        esac
+    done
+}
+
+copy_autoinstall_file

@@ -1,0 +1,88 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-only
+
+# Copyright (c) 2019, AT&T Intellectual Property.
+# All Rights Reserved.
+
+# Copyright (c) 2017 by Brocade Communications Systems, Inc.
+# All rights reserved.
+
+source "${vyatta_sbindir}/vyatta-create-partition.functions"
+source "${vyatta_sbindir}/install-get-partition.functions"
+
+#
+# setup_raid [raid type] [label] [install drive] [install drive] ...
+#
+setup_raid () {
+    local args=( "$@" )
+    local level=${args[0]}
+    local label=${args[1]}
+    local ldrives=( "${args[@]:2}" )
+    if [[ ${#args[@]} -lt 4 ]]; then
+        fail_exit "Fatal error in setting up RAID"
+    fi
+
+    local md_dev="/dev/md/md-$label"
+    local underlying=""
+    for d in ${ldrives[@]}; do
+        # Remove any lingering filesystem nonsense. 256k should do it.
+        # mdadm sometimes fails because it finds an existing fs that
+        # survived from previous installs.
+        run_command dd if=/dev/zero bs=512 count=512 of="/dev/$d"
+        underlying="$underlying /dev/$d"
+    done
+
+    run_command mdadm --create --auto=mdp --verbose "$md_dev" --level="$level" \
+        --force --run --raid-devices=${#ldrives[@]} --name="md-$label" $underlying
+    if [ $? -ne 0 ]; then
+    fail_exit "Failed to create RAID array."
+    fi
+
+    run_command parted -s "$md_dev" mklabel 'gpt'
+    if [ $? -ne 0 ]; then
+    fail_exit "Failed to create disk label"
+    fi
+
+    echo "md/md-$label"
+}
+
+#
+# create_partition [install drive] [label] [size] [filesystem]
+# Returns the logical device of the partition created.
+#
+create_partition() {
+    local ldrive=$1
+    local part_label=$2
+    local part_size=$3
+    local part_fs=$4
+
+    local offset=$(find_first_fit "/dev/$ldrive" "$part_size")
+    if [[ -z $offset ]]; then
+        fail_exit "Unable to find a sector big enough for the $part_label partition"
+    fi
+    local end="$(expr "$(printf %.0f "$(_to_MB "$offset")")" + "$part_size")"
+    # _to_MB returns float, which expr does not like
+   
+    local new_drive="$ldrive$(first_missing_part $ldrive)"
+        
+    lecho "Creating partition from ${offset}:${end}MB with FS label: $part_label"
+
+    if [[ ${VII_DISK_LABEL} == "msdos" ]]; then
+        run_command parted -s -a optimal /dev/$ldrive \
+            mkpart primary ${offset} ${end}MB
+    elif [[ ${VII_DISK_LABEL} == "gpt" ]]; then
+        run_command parted -s -a optimal /dev/$ldrive \
+            mkpart "$part_label" ${offset} ${end}MB
+    else
+        fail_exit "No valid disk label set."
+    fi
+
+    wait_for_partprobe "/dev/$new_drive"
+
+    if [[ $part_fs ]]; then
+        make_filesystem "$new_drive" "$part_fs"
+        set_label "$new_drive" "$part_label" "$part_fs"
+    fi
+
+    return 0
+}

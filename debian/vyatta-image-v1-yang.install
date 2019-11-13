@@ -1,0 +1,5 @@
+yang/vyatta-image-v1.yang usr/share/configd/yang
+scripts/rename-image.pl opt/vyatta/bin
+scripts/clone-image.pl opt/vyatta/sbin
+scripts/vyatta-image-rpc opt/vyatta/sbin
+scripts/vyatta-image-op opt/vyatta/bin

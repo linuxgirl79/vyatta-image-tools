@@ -1,0 +1,36 @@
+#!/bin/bash
+#
+# Writes the RAID config files to the new image
+#
+
+set -e
+
+: ${vyatta_prefix:=/opt/vyatta}
+: ${vyatta_exec_prefix:=$vyatta_prefix}
+: ${vyatta_sbindir:=${vyatta_exec_prefix}/sbin}
+
+source ${vyatta_sbindir}/vyatta-install-image.functions
+
+# Make sure the new image is aware of any RAID configurations
+create_raid_config ()
+{
+    local root_dir=${1?Missing Argument}
+    if [[ $(ls /dev/md/md*) ]]; then
+        run_command mdadm --detail --scan >> ${root_dir}/etc/mdadm/mdadm.conf
+        run_command sed -i 's/<system>/<none>/g' ${root_dir}/etc/mdadm/mdadm.conf
+        run_command chroot ${root_dir} update-initramfs -u -t -b /boot
+    fi
+}
+
+case "$1" in
+    configure)
+	;;
+    run)
+    create_raid_config $2
+	;;
+    *)
+	fail_exit "$0: unknown command: \"$1\""
+	;;
+esac
+
+exit 0

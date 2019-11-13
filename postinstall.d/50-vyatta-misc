@@ -1,0 +1,78 @@
+#!/bin/bash
+#
+# Vyatta misc postinstall hook
+#
+
+set -e
+
+: ${vyatta_prefix:=/opt/vyatta}
+: ${vyatta_exec_prefix:=$vyatta_prefix}
+: ${vyatta_sbindir:=${vyatta_exec_prefix}/sbin}
+: ${vyatta_yangdir:=/usr/share/configd/yang}
+source ${vyatta_sbindir}/vyatta-install-image.functions
+
+function misc_configure ()
+{
+    # nothing to configure and run by default
+    echo "VII_POSTINSTALL_VYATTA_MISC=${VII_POSTINSTALL_VYATTA_MISC:-true}"
+}
+
+# remove opmode install template
+remove_opmode_install_template ()
+{
+    local INST_ROOT=${1}
+
+    local install_tmplt=${INST_ROOT}${vyatta_datadir}/vyatta-op/templates/install
+
+    # delete install template
+    if [ -d $install_tmplt ]; then
+        lecho "$(rm -vfr $install_tmplt/)"
+    fi
+}
+
+# remove opmode install system yang
+remove_opmode_install_yang ()
+{
+    local INST_ROOT=${1}
+
+    local install_yang=${INST_ROOT}${vyatta_yangdir}/vyatta-op-install-v1.yang
+
+    # delete install yang
+    if [ -e $install_yang ]; then
+        lecho "$(rm -vf $install_yang)"
+    fi
+
+    local install_image_yang=${INST_ROOT}${vyatta_yangdir}/vyatta-op-install-image-v1.yang
+
+    # delete install yang
+    if [ -e $install_image_yang ]; then
+        lecho "$(rm -vf $install_image_yang)"
+    fi
+}
+
+function misc_run ()
+{
+    local root_dir=${1?Missing argument}
+    local image_name=${2?Missing argument}
+
+    # remove operational mode install template
+    # as it has no use outside of livecd
+    lecho "${FUNCNAME}: removing opmode install template"
+    remove_opmode_install_template ${root_dir}
+    lecho "${FUNCNAME}: removing opmode install yang files"
+    remove_opmode_install_yang ${root_dir}
+}
+
+case "$1" in
+    configure)
+	misc_configure
+	;;
+    run)
+	[ "${VII_POSTINSTALL_VYATTA_MISC}" = 'true' ] && misc_run $2 $3
+	;;
+    *)
+	fail_exit "$0: unknown command: \"$1\""
+	;;
+esac
+
+exit 0
